@@ -4,8 +4,8 @@
 101 ICON "stillmeter.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,5,2,0
- PRODUCTVERSION 1,5,2,0
+ FILEVERSION 1,5,3,0
+ PRODUCTVERSION 1,5,3,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0
  FILEOS 0x40004L
@@ -17,11 +17,11 @@
      BLOCK "040904b0"
      BEGIN
        VALUE "FileDescription", "Stillmeter system monitor"
-       VALUE "FileVersion", "1.5.2.0"
+       VALUE "FileVersion", "1.5.3.0"
        VALUE "InternalName", "Stillmeter"
        VALUE "OriginalFilename", "Stillmeter.exe"
        VALUE "ProductName", "Stillmeter"
-       VALUE "ProductVersion", "1.5.2.0"
+       VALUE "ProductVersion", "1.5.3.0"
      END
    END
    BLOCK "VarFileInfo"
@@ -40,10 +40,13 @@ BEGIN
     LTEXT "&Preset", -1, 12, 16, 33, 10
     COMBOBOX IDC_STRIP_PRESET, 48, 12, 104, 80, 0x00010000 | 0x0003 | 0x00200000
     GROUPBOX "Metrics", -1, 12, 38, 148, 83
-    AUTOCHECKBOX "Upload and download", IDC_STRIP_NETWORK, 21, 52, 128, 11, 0x00010000
-    AUTOCHECKBOX "CPU and memory", IDC_STRIP_SYSTEM, 21, 68, 128, 11, 0x00010000
-    AUTOCHECKBOX "GPU and CPU frequency", IDC_STRIP_GRAPHICS, 21, 84, 128, 11, 0x00010000
-    AUTOCHECKBOX "Total traffic", IDC_STRIP_TOTAL, 21, 100, 128, 11, 0x00010000
+    AUTOCHECKBOX "Upload", IDC_STRIP_UPLOAD, 21, 52, 60, 11, 0x00010000
+    AUTOCHECKBOX "Download", IDC_STRIP_DOWNLOAD, 85, 52, 70, 11, 0x00010000
+    AUTOCHECKBOX "CPU", IDC_STRIP_CPU, 21, 68, 60, 11, 0x00010000
+    AUTOCHECKBOX "Memory", IDC_STRIP_MEMORY, 85, 68, 70, 11, 0x00010000
+    AUTOCHECKBOX "GPU", IDC_STRIP_GPU, 21, 84, 60, 11, 0x00010000
+    AUTOCHECKBOX "CPU frequency", IDC_STRIP_CPU_FREQUENCY, 85, 84, 70, 11, 0x00010000
+    AUTOCHECKBOX "Total traffic", IDC_STRIP_TOTAL, 21, 100, 60, 11, 0x00010000
     GROUPBOX "Layout", -1, 171, 38, 150, 83
     LTEXT "R&ows", -1, 180, 55, 53, 10
     COMBOBOX IDC_STRIP_ROWS, 236, 51, 76, 65, 0x00010000 | 0x0003
