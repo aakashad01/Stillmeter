@@ -19,7 +19,7 @@
 #define FOREGROUND_CHANGED_EVENT (WM_APP + 4)
 #define LAYOUT_POLL_MS 2000
 #define APPEARANCE_KEY L"Software\\Stillmeter"
-#define APPEARANCE_VALUE L"StripAppearanceV2"
+#define APPEARANCE_VALUE L"StripAppearanceV3"
 
 enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP, STRIP_APPEARANCE };
 
@@ -55,16 +55,19 @@ typedef struct {
 static Application app;
 
 static const StripAppearance appearance_presets[] = {
-    {12, 6, 1, STRIP_ALL_GROUPS, 2, 0, 1},
-    {11, 3, 0, STRIP_NETWORK | STRIP_SYSTEM, 2, 0, 1},
-    {16, 6, 2, STRIP_NETWORK | STRIP_SYSTEM, 1, 0, 2}
+    {12, 6, 1, STRIP_ALL_METRICS, 2, 0, 1},
+    {11, 3, 0, STRIP_UPLOAD | STRIP_DOWNLOAD | STRIP_CPU | STRIP_MEMORY, 2, 0, 1},
+    {16, 6, 2, STRIP_UPLOAD | STRIP_DOWNLOAD | STRIP_CPU | STRIP_MEMORY, 1, 0, 2}
 };
+
+_Static_assert(IDC_STRIP_TOTAL - IDC_STRIP_UPLOAD + 1 == STRIP_METRIC_COUNT,
+               "Metric control IDs must cover the metric mask");
 
 static bool appearance_valid(const StripAppearance *value)
 {
     return value->font_size >= 9 && value->font_size <= 20 &&
            value->column_gap <= 24 && value->row_gap <= 12 &&
-           value->groups > 0 && value->groups <= STRIP_ALL_GROUPS &&
+           value->metrics > 0 && value->metrics <= STRIP_ALL_METRICS &&
            (value->rows == 1 || value->rows == 2) && value->align_right <= 1 &&
            value->weight <= 2;
 }
@@ -77,6 +80,23 @@ static StripAppearance load_appearance(void)
                      RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
         bytes == sizeof(saved) && appearance_valid(&saved))
         return saved;
+
+    // V2 stored four group bits in the same field as the V3 metric mask.
+    bytes = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, L"StripAppearanceV2",
+                     RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
+        bytes == sizeof(saved) && saved.metrics <= 15) {
+        static const DWORD group_metrics[] = {
+            STRIP_UPLOAD | STRIP_DOWNLOAD, STRIP_CPU | STRIP_MEMORY,
+            STRIP_GPU | STRIP_CPU_FREQUENCY, STRIP_TOTAL
+        };
+        const DWORD groups = saved.metrics;
+        saved.metrics = 0;
+        for (unsigned i = 0; i < sizeof(group_metrics) / sizeof(*group_metrics); ++i)
+            if (groups & (1u << i)) saved.metrics |= group_metrics[i];
+        if (appearance_valid(&saved)) return saved;
+    }
+
     // Preserve the three appearance fields stored by versions 1.3 and 1.4.
     DWORD legacy[3];
     bytes = sizeof(legacy);
@@ -449,9 +469,9 @@ static void fill_appearance_dialog(HWND dialog, AppearanceDialog *state, const S
     SetDlgItemInt(dialog, IDC_STRIP_FONT_SIZE, value->font_size, FALSE);
     SetDlgItemInt(dialog, IDC_STRIP_COLUMN_GAP, value->column_gap, FALSE);
     SetDlgItemInt(dialog, IDC_STRIP_ROW_GAP, value->row_gap, FALSE);
-    for (unsigned i = 0; i < 4; ++i)
-        CheckDlgButton(dialog, IDC_STRIP_NETWORK + (int)i,
-                       value->groups & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
+    for (unsigned i = 0; i < STRIP_METRIC_COUNT; ++i)
+        CheckDlgButton(dialog, IDC_STRIP_UPLOAD + (int)i,
+                       value->metrics & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
     SendDlgItemMessageW(dialog, IDC_STRIP_ROWS, CB_SETCURSEL, value->rows - 1, 0);
     SendDlgItemMessageW(dialog, IDC_STRIP_ALIGNMENT, CB_SETCURSEL, value->align_right, 0);
     SendDlgItemMessageW(dialog, IDC_STRIP_WEIGHT, CB_SETCURSEL, value->weight, 0);
@@ -482,9 +502,9 @@ static bool read_appearance_dialog(HWND dialog, StripAppearance *value)
     value->rows = (DWORD)(SendDlgItemMessageW(dialog, IDC_STRIP_ROWS, CB_GETCURSEL, 0, 0) + 1);
     value->align_right = (DWORD)SendDlgItemMessageW(dialog, IDC_STRIP_ALIGNMENT, CB_GETCURSEL, 0, 0);
     value->weight = (DWORD)SendDlgItemMessageW(dialog, IDC_STRIP_WEIGHT, CB_GETCURSEL, 0, 0);
-    for (unsigned i = 0; i < 4; ++i)
-        if (IsDlgButtonChecked(dialog, IDC_STRIP_NETWORK + (int)i) == BST_CHECKED)
-            value->groups |= 1u << i;
+    for (unsigned i = 0; i < STRIP_METRIC_COUNT; ++i)
+        if (IsDlgButtonChecked(dialog, IDC_STRIP_UPLOAD + (int)i) == BST_CHECKED)
+            value->metrics |= 1u << i;
     return read_appearance_field(dialog, IDC_STRIP_FONT_SIZE, &value->font_size) &&
            read_appearance_field(dialog, IDC_STRIP_COLUMN_GAP, &value->column_gap) &&
            read_appearance_field(dialog, IDC_STRIP_ROW_GAP, &value->row_gap) &&
@@ -499,8 +519,8 @@ static void update_appearance_preview(HWND dialog, AppearanceDialog *state)
     EnableWindow(GetDlgItem(dialog, IDC_STRIP_APPLY), valid);
     EnableWindow(GetDlgItem(dialog, IDC_STRIP_ROW_GAP), value.rows != 1);
     SetDlgItemTextW(dialog, IDC_STRIP_HINT, valid ? L"" :
-                    value.groups ? L"Font 9–20 px, column gap 0–24 px, row gap 0–12 px."
-                                 : L"Select at least one metric group.");
+                    value.metrics ? L"Font 9–20 px, column gap 0–24 px, row gap 0–12 px."
+                                  : L"Select at least one metric.");
 
     const UINT dpi = window_dpi(dialog);
     state->preview = valid && view_strip_prepare(&state->preview_layout, &value, dpi, scale(48, dpi))
@@ -568,7 +588,7 @@ static INT_PTR CALLBACK appearance_proc(HWND dialog, UINT message, WPARAM wparam
             fill_appearance_dialog(dialog, state, &appearance_presets[index - 1]);
         update_appearance_preview(dialog, state);
     } else if ((command >= IDC_STRIP_FONT_SIZE && command <= IDC_STRIP_ROW_GAP && notification == EN_CHANGE) ||
-               (command >= IDC_STRIP_NETWORK && command <= IDC_STRIP_TOTAL && notification == BN_CLICKED) ||
+               (command >= IDC_STRIP_UPLOAD && command <= IDC_STRIP_TOTAL && notification == BN_CLICKED) ||
                (command >= IDC_STRIP_ROWS && command <= IDC_STRIP_WEIGHT && notification == CBN_SELCHANGE)) {
         SendDlgItemMessageW(dialog, IDC_STRIP_PRESET, CB_SETCURSEL, 0, 0);
         update_appearance_preview(dialog, state);

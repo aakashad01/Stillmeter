@@ -324,13 +324,15 @@ void view_strip_layout_close(StripLayout *layout)
     *layout = (StripLayout){0};
 }
 
-static const wchar_t *const strip_labels[8] = {
-    L"\u2191 ", L"\u2193 ", L"CPU ", L"RAM ", L"GPU ", L"CPU freq ", L"Total traffic", L""
+enum { TOTAL_METRIC_INDEX = STRIP_METRIC_COUNT - 1 };
+
+static const wchar_t *const strip_labels[STRIP_METRIC_COUNT] = {
+    L"\u2191 ", L"\u2193 ", L"CPU ", L"RAM ", L"GPU ", L"CPU freq ", L"Total traffic"
 };
 
-static const wchar_t *const strip_examples[8] = {
+static const wchar_t *const strip_examples[STRIP_METRIC_COUNT] = {
     L"\u2191 999.9 MB/s", L"\u2193 999.9 MB/s", L"CPU 100%", L"RAM 100%",
-    L"GPU 100%", L"CPU freq 99.99 GHz", L"Total traffic", L"999.9 TB"
+    L"GPU 100%", L"CPU freq 99.99 GHz", L"Total traffic"
 };
 
 static int text_extent(HDC dc, const wchar_t *text)
@@ -340,28 +342,45 @@ static int text_extent(HDC dc, const wchar_t *text)
     return (extent.cx + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE;
 }
 
-static void measure_columns(StripLayout *layout, HDC dc, int inset)
+static void measure_cells(StripLayout *layout, HDC dc, int inset)
 {
     const StripAppearance *appearance = &layout->appearance;
-    layout->width = 2 * layout->padding;
-    unsigned col = 0;
-    for (unsigned group = 0; group < 4; ++group) {
-        if (!(appearance->groups & (1u << group))) continue;
-        int upper = text_extent(dc, strip_examples[2 * group]);
-        int lower = text_extent(dc, strip_examples[2 * group + 1]);
-        if (group == 3 && appearance->rows == 1) {
-            upper = text_extent(dc, L"Total 999.9 TB");
-            lower = 0;
+    const unsigned rows = appearance->rows;
+    unsigned slots[STRIP_METRIC_COUNT] = {0};
+    int widths[STRIP_METRIC_COUNT] = {0};
+    int offsets[STRIP_METRIC_COUNT];
+    unsigned next_slot = 0;
+    for (unsigned i = 0; i < STRIP_METRIC_COUNT; ++i) {
+        if (!(appearance->metrics & (1u << i))) continue;
+        int width = text_extent(dc, strip_examples[i]);
+        if (i == TOTAL_METRIC_INDEX) {
+            if (rows == 2) {
+                // Keep the total label and value in their own column.
+                next_slot += next_slot % rows;
+                const int value_width = text_extent(dc, L"999.9 TB");
+                if (value_width > width) width = value_width;
+            } else {
+                width = text_extent(dc, L"Total 999.9 TB");
+            }
         }
-        if (appearance->rows == 1 && group != 3) {
-            layout->column_width[col++] = upper + 2 * inset;
-            layout->column_width[col++] = lower + 2 * inset;
-        } else {
-            layout->column_width[col++] = (upper > lower ? upper : lower) + 2 * inset;
-        }
+        slots[i] = next_slot++;
+        const unsigned col = slots[i] / rows;
+        width += 2 * inset;
+        if (width > widths[col]) widths[col] = width;
     }
-    for (unsigned i = 0; i < col; ++i)
-        layout->width += layout->column_width[i] + (i ? layout->column_gap : 0);
+
+    const unsigned columns = (next_slot + rows - 1) / rows;
+    layout->width = 2 * layout->padding;
+    for (unsigned col = 0; col < columns; ++col) {
+        if (col) layout->width += layout->column_gap;
+        offsets[col] = layout->width - layout->padding;
+        layout->width += widths[col];
+    }
+    for (unsigned i = 0; i < STRIP_METRIC_COUNT; ++i) {
+        if (!(appearance->metrics & (1u << i))) continue;
+        const unsigned col = slots[i] / rows;
+        layout->cells[i] = (StripCell){offsets[col], widths[col], (int)(slots[i] % rows)};
+    }
 }
 
 bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
@@ -399,7 +418,7 @@ bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
                 layout->row_gap = gap;
                 layout->row_height = row_height;
                 layout->height = height_limit - remaining + gap;
-                measure_columns(layout, dc, inset);
+                measure_cells(layout, dc, inset);
                 layout->font = font;
             }
         }
@@ -507,9 +526,13 @@ static void draw_strip_mask(HDC dc, const StripLayout *layout, const Monitor *mo
     solid(dc, &bounds, RGB(0, 0, 0));
 
     if (paused) {
+        const wchar_t *status = L"Stillmeter  |  Sampling paused";
+        const int width = layout->width - 2 * layout->padding;
+        HGDIOBJ old_font = SelectObject(dc, layout->font);
+        if (text_extent(dc, status) > width) status = L"Paused";
+        SelectObject(dc, old_font);
         strip_metric(dc, layout, layout->padding,
-                     (layout->height - layout->row_height) / 2,
-                     layout->width - 2 * layout->padding, L"Stillmeter", L"  |  Sampling paused");
+                     (layout->height - layout->row_height) / 2, width, L"", status);
         return;
     }
 
@@ -526,37 +549,26 @@ static void draw_strip_mask(HDC dc, const StripLayout *layout, const Monitor *mo
     if (monitor->cpu_mhz > 0.0)
         swprintf(frequency, 24, L"%.2f GHz", monitor->cpu_mhz / 1000.0);
 
-    const wchar_t *const values[] = {upload, download, cpu, memory, gpu, frequency, L"", total};
+    const wchar_t *const values[STRIP_METRIC_COUNT] = {upload, download, cpu, memory, gpu, frequency, total};
     const StripAppearance *appearance = &layout->appearance;
     const int top = (layout->height - (int)appearance->rows * layout->row_height - layout->row_gap) / 2;
-    const int bottom = top + layout->row_height + layout->row_gap;
-    int x = layout->padding;
-    unsigned col = 0;
-    for (unsigned group = 0; group < 4; ++group) {
-        if (!(appearance->groups & (1u << group))) continue;
-        const unsigned first = group * 2;
-        if (appearance->rows == 1) {
-            if (group == 3) {
-                strip_metric(dc, layout, x, top, layout->column_width[col], L"Total ", total);
-                break;
-            }
-            for (unsigned item = first; item < first + 2; ++item) {
-                const int width = layout->column_width[col++];
-                strip_metric(dc, layout, x, top, width, strip_labels[item], values[item]);
-                x += width + layout->column_gap;
-            }
-        } else {
-            const int width = layout->column_width[col++];
-            if (group == 3 && col > 1 && layout->column_gap >= 4) {
-                const int divider = x - layout->column_gap / 2;
+    const int row_step = layout->row_height + layout->row_gap;
+    for (unsigned i = 0; i < STRIP_METRIC_COUNT; ++i) {
+        if (!(appearance->metrics & (1u << i))) continue;
+        const StripCell cell = layout->cells[i];
+        if (i == TOTAL_METRIC_INDEX && appearance->rows == 2) {
+            if (cell.x > layout->padding && layout->column_gap >= 4) {
+                const int divider = cell.x - layout->column_gap / 2;
                 const RECT rule = {divider * STRIP_SUPERSAMPLE, top * STRIP_SUPERSAMPLE,
                                    (divider + 1) * STRIP_SUPERSAMPLE,
-                                   (bottom + layout->row_height) * STRIP_SUPERSAMPLE};
+                                   (top + row_step + layout->row_height) * STRIP_SUPERSAMPLE};
                 solid(dc, &rule, RGB(125, 125, 125));
             }
-            strip_metric(dc, layout, x, top, width, strip_labels[first], values[first]);
-            strip_metric(dc, layout, x, bottom, width, strip_labels[first + 1], values[first + 1]);
-            x += width + layout->column_gap;
+            strip_metric(dc, layout, cell.x, top, cell.width, strip_labels[i], L"");
+            strip_metric(dc, layout, cell.x, top + row_step, cell.width, L"", total);
+        } else {
+            const wchar_t *label = i == TOTAL_METRIC_INDEX ? L"Total " : strip_labels[i];
+            strip_metric(dc, layout, cell.x, top + cell.row * row_step, cell.width, label, values[i]);
         }
     }
 }

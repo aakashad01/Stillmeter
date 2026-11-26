@@ -18,15 +18,22 @@ typedef struct {
 } ViewFonts;
 
 enum {
-    STRIP_NETWORK = 1, STRIP_SYSTEM = 2, STRIP_GRAPHICS = 4, STRIP_TOTAL = 8,
-    STRIP_ALL_GROUPS = 15
+    STRIP_UPLOAD = 1u << 0,
+    STRIP_DOWNLOAD = 1u << 1,
+    STRIP_CPU = 1u << 2,
+    STRIP_MEMORY = 1u << 3,
+    STRIP_GPU = 1u << 4,
+    STRIP_CPU_FREQUENCY = 1u << 5,
+    STRIP_TOTAL = 1u << 6,
+    STRIP_METRIC_COUNT = 7,
+    STRIP_ALL_METRICS = (1u << STRIP_METRIC_COUNT) - 1
 };
 
 typedef struct {
     DWORD font_size;
     DWORD column_gap;
     DWORD row_gap;
-    DWORD groups;
+    DWORD metrics;
     DWORD rows;
     DWORD align_right;
     DWORD weight;
@@ -40,6 +47,12 @@ static inline bool strip_appearance_equal(const StripAppearance *a, const StripA
 }
 
 typedef struct {
+    int x;
+    int width;
+    int row;
+} StripCell;
+
+typedef struct {
     HFONT font;
     StripAppearance appearance;
     UINT dpi;
@@ -49,7 +62,7 @@ typedef struct {
     int row_height;
     int row_gap;
     int column_gap;
-    int column_width[7];
+    StripCell cells[STRIP_METRIC_COUNT];
 } StripLayout;
 
 typedef struct {
