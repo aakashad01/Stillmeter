@@ -4,9 +4,9 @@ Stillmeter is a portable Windows monitor for download and upload rates, CPU load
 
 ## Download
 
-[Download Stillmeter 1.5.2 for Windows (ZIP)](https://github.com/aakashad01/Stillmeter/archive/refs/tags/v1.5.2.zip)
+[Download Stillmeter 1.5.3 for Windows (ZIP)](https://github.com/aakashad01/Stillmeter/archive/refs/tags/v1.5.3.zip)
 
-The ZIP includes both Windows executables, source code, and SHA-256 checksums. See the [v1.5.2 release notes](https://github.com/aakashad01/Stillmeter/releases/tag/v1.5.2).
+The ZIP includes both Windows executables, source code, and SHA-256 checksums. See the [v1.5.3 release notes](https://github.com/aakashad01/Stillmeter/releases/tag/v1.5.3).
 
 ## Run
 
