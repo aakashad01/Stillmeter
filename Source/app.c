@@ -27,6 +27,9 @@ typedef struct {
     HINSTANCE instance;
     HWND dashboard;
     HWND strip;
+    HWND strip_taskbar;
+    bool strip_docked;
+    bool layout_started;
     HWND strip_button;
     HWND pause_button;
     HWND appearance_button;
@@ -169,7 +172,7 @@ static void tray_menu(POINT position)
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, SHOW_DASHBOARD, L"Open dashboard");
     AppendMenuW(menu, MF_STRING | (app.strip_enabled ? MF_CHECKED : MF_UNCHECKED) |
-                (app.strip ? MF_ENABLED : MF_GRAYED),
+                (app.layout_started ? MF_ENABLED : MF_GRAYED),
                 TOGGLE_STRIP, L"Show taskbar strip");
     AppendMenuW(menu, MF_STRING, STRIP_APPEARANCE, L"Strip appearance…");
     AppendMenuW(menu, MF_STRING, TOGGLE_PAUSE, app.paused ? L"Resume sampling" : L"Pause sampling");
@@ -221,7 +224,7 @@ static bool fullscreen_on(HWND foreground, HMONITOR monitor, const RECT *screen)
            client.right >= screen->right && client.bottom >= screen->bottom;
 }
 
-static const StripLayout *strip_bounds(HWND taskbar, HWND foreground, bool retain_layout, RECT *target)
+static const StripLayout *strip_bounds(HWND taskbar, bool retain_layout, RECT *target)
 {
     if (!taskbar || !IsWindowVisible(taskbar)) return NULL;
     const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONULL);
@@ -234,8 +237,8 @@ static const StripLayout *strip_bounds(HWND taskbar, HWND foreground, bool retai
     const int taskbar_height = visible.bottom - visible.top;
     const int taskbar_width = visible.right - visible.left;
     const UINT native_dpi = window_dpi(taskbar);
-    if (taskbar_width < taskbar_height || taskbar_height < scale(28, native_dpi) ||
-        (!app.panel_open && fullscreen_on(foreground, monitor, &monitor_info.rcMonitor)))
+
+    if (taskbar_width < taskbar_height || taskbar_height < scale(28, native_dpi))
         return NULL;
 
     const int padding = scale(4, native_dpi);
@@ -251,11 +254,105 @@ static const StripLayout *strip_bounds(HWND taskbar, HWND foreground, bool retai
     return NULL;
 }
 
+static bool taskbar_can_host_strip(HWND taskbar)
+{
+    // Only attach to the window owned by the current desktop shell.
+    const HWND shell = GetShellWindow();
+    if (!shell) return false;
+    DWORD shell_process = 0, taskbar_process = 0;
+    GetWindowThreadProcessId(shell, &shell_process);
+    GetWindowThreadProcessId(taskbar, &taskbar_process);
+    return shell_process && shell_process == taskbar_process;
+}
+
+static HWND create_strip_window(HWND taskbar, bool docked)
+{
+    DPI_AWARENESS_CONTEXT previous = NULL;
+    if (docked) {
+        const DPI_AWARENESS_CONTEXT host_dpi = GetWindowDpiAwarenessContext(taskbar);
+        if (host_dpi) previous = SetThreadDpiAwarenessContext(host_dpi);
+    }
+    const DWORD styles = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT;
+    HWND window = CreateWindowExW(styles | (docked ? 0 : WS_EX_TOPMOST),
+                                 STRIP_CLASS, L"Stillmeter taskbar strip",
+                                 docked ? WS_CHILD : WS_POPUP,
+                                 0, 0, 0, 0, docked ? taskbar : NULL,
+                                 NULL, app.instance, NULL);
+    if (previous) SetThreadDpiAwarenessContext(previous);
+    return window;
+}
+
+static bool ensure_strip_window(HWND taskbar)
+{
+    if (app.strip_taskbar == taskbar && IsWindow(app.strip)) return true;
+    if (app.strip) DestroyWindow(app.strip);
+
+    app.strip_taskbar = taskbar;
+    app.strip_docked = false;
+    if (taskbar_can_host_strip(taskbar)) {
+        app.strip = create_strip_window(taskbar, true);
+        app.strip_docked = app.strip != NULL;
+    }
+    if (!app.strip) app.strip = create_strip_window(taskbar, false);
+    return app.strip != NULL;
+}
+
+static bool show_docked_strip(HWND taskbar, const RECT *desired, bool move, bool shown)
+{
+    if (move) {
+        RECT relative = *desired;
+        MapWindowPoints(HWND_DESKTOP, taskbar, (POINT *)&relative, 2);
+        if (!SetWindowPos(app.strip, HWND_TOP, relative.left, relative.top,
+                          relative.right - relative.left, relative.bottom - relative.top,
+                          SWP_NOACTIVATE | SWP_NOOWNERZORDER))
+            return false;
+        if (!view_strip(app.strip, NULL, app.placed_layout, &app.strip_surface,
+                        &app.monitor, app.paused))
+            return false;
+    }
+    // This is the top of Explorer's child windows, not the desktop's topmost band.
+    if (!shown || GetWindow(app.strip, GW_HWNDPREV))
+        return SetWindowPos(app.strip, HWND_TOP, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                            SWP_SHOWWINDOW | SWP_NOOWNERZORDER) != FALSE;
+    return true;
+}
+
+static void show_overlay_strip(HWND taskbar, HWND foreground, const RECT *desired,
+                               bool move, bool shown)
+{
+    MONITORINFO screen = {.cbSize = sizeof(screen)};
+    const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONULL);
+    if (!app.panel_open && monitor && GetMonitorInfoW(monitor, &screen) &&
+        fullscreen_on(foreground, monitor, &screen.rcMonitor)) {
+        if (shown) ShowWindow(app.strip, SW_HIDE);
+        return;
+    }
+
+    bool raise_strip = !shown;
+    if (shown)
+        for (HWND other = GetWindow(app.strip, GW_HWNDPREV); other; other = GetWindow(other, GW_HWNDPREV))
+            if (other == taskbar || (app.panel_open && other == foreground)) {
+                raise_strip = true;
+                break;
+            }
+
+    if (move) {
+        const POINT position = {desired->left, desired->top};
+        if (!view_strip(app.strip, &position, app.placed_layout, &app.strip_surface,
+                        &app.monitor, app.paused)) {
+            if (shown) ShowWindow(app.strip, SW_HIDE);
+            return;
+        }
+    }
+    if (raise_strip)
+        SetWindowPos(app.strip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+}
+
 static void position_strip(void)
 {
-    if (!app.strip) return;
-
-    const bool shown = IsWindowVisible(app.strip) != FALSE;
+    const bool shown = app.strip && IsWindowVisible(app.strip);
     if (!app.strip_enabled || app.suspended) {
         app.placed_layout = NULL;
         app.panel_open = false;
@@ -273,37 +370,29 @@ static void position_strip(void)
         request_layout(true);
     }
     app.panel_open = panel_open;
-    // Keep the measured gap while Start or Search is open and while Explorer refreshes it.
     const bool retain_layout = shown && (panel_open || (app.panel_closed_at &&
                                        now - app.panel_closed_at < LAYOUT_POLL_MS));
     RECT desired;
-    app.placed_layout = strip_bounds(taskbar, foreground, retain_layout, &desired);
+    app.placed_layout = strip_bounds(taskbar, retain_layout, &desired);
     if (!app.placed_layout) {
         if (shown) ShowWindow(app.strip, SW_HIDE);
         return;
     }
+    if (!ensure_strip_window(taskbar)) return;
 
     RECT current;
-    bool raise_strip = false;
-    if (shown)
-        for (HWND other = GetWindow(app.strip, GW_HWNDPREV); other; other = GetWindow(other, GW_HWNDPREV))
-            if (other == taskbar || (panel_open && other == foreground)) {
-                raise_strip = true;
-                break;
-            }
-
-    if (!shown || !GetWindowRect(app.strip, &current) || !EqualRect(&current, &desired)) {
-        const POINT position = {desired.left, desired.top};
-        if (!view_strip(app.strip, &position, app.placed_layout, &app.strip_surface,
-                        &app.monitor, app.paused)) {
-            if (shown) ShowWindow(app.strip, SW_HIDE);
-            app.placed_layout = NULL;
-            return;
-        }
+    const bool current_shown = IsWindowVisible(app.strip);
+    const bool move = !current_shown || !GetWindowRect(app.strip, &current) ||
+                      !EqualRect(&current, &desired);
+    if (app.strip_docked) {
+        if (show_docked_strip(taskbar, &desired, move, current_shown)) return;
+        DestroyWindow(app.strip);
+        app.strip_docked = false;
+        app.strip = create_strip_window(taskbar, false);
+        if (app.strip) show_overlay_strip(taskbar, foreground, &desired, true, false);
+    } else {
+        show_overlay_strip(taskbar, foreground, &desired, move, current_shown);
     }
-    if (!shown || raise_strip)
-        SetWindowPos(app.strip, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
 }
 
 static void repaint(void)
@@ -568,10 +657,17 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         if (!app.strip_button || !app.pause_button || !app.appearance_button) return -1;
         layout_buttons(window);
         return 0;
-    case WM_PAINT:
-        view_dashboard(window, &app.dashboard_fonts, &app.monitor, app.paused,
-                       app.strip_enabled && !IsWindowVisible(app.strip));
+    case WM_PAINT: {
+        const wchar_t *strip_status = NULL;
+        if (app.strip_enabled) {
+            if (!IsWindowVisible(app.strip))
+                strip_status = L"Taskbar strip is waiting for a clear space.";
+            else if (!app.strip_docked)
+                strip_status = L"Taskbar attachment unavailable. Using an overlay.";
+        }
+        view_dashboard(window, &app.dashboard_fonts, &app.monitor, app.paused, strip_status);
         return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_TIMER:
@@ -655,6 +751,9 @@ static LRESULT CALLBACK strip_proc(HWND window, UINT message, WPARAM wparam, LPA
     case WM_PAINT:
         ValidateRect(window, NULL);
         return 0;
+    case WM_NCDESTROY:
+        if (app.strip == window) app.strip = NULL;
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_NCHITTEST:
@@ -662,8 +761,9 @@ static LRESULT CALLBACK strip_proc(HWND window, UINT message, WPARAM wparam, LPA
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     default:
-        return DefWindowProcW(window, message, wparam, lparam);
+        break;
     }
+    return DefWindowProcW(window, message, wparam, lparam);
 }
 
 static bool create_windows(void)
@@ -704,22 +804,16 @@ static bool create_windows(void)
                        width, height, NULL, NULL, app.instance, NULL);
     if (!app.dashboard) return false;
 
-    app.strip = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST |
-                                WS_EX_LAYERED | WS_EX_TRANSPARENT,
-                                STRIP_CLASS, L"Stillmeter taskbar strip", WS_POPUP,
-                                0, 0, 0, 0, NULL, NULL, app.instance, NULL);
-    if (!app.strip || !taskbar_layout_start(app.dashboard)) {
-        if (app.strip) DestroyWindow(app.strip);
-        app.strip = NULL;
+    app.layout_started = taskbar_layout_start(app.dashboard);
+    if (!app.layout_started) {
         app.strip_enabled = false;
         EnableWindow(app.strip_button, FALSE);
         SetWindowTextW(app.strip_button, L"Strip unavailable");
-    }
-
-    if (app.strip)
+    } else {
         app.foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
                                              NULL, foreground_changed, 0, 0,
                                              WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
     return SetTimer(app.dashboard, SAMPLE_TIMER, TIMER_INTERVAL_MS, NULL) != 0;
 }
 

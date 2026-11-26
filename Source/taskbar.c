@@ -161,6 +161,13 @@ static bool record_automated_controls(IUIAutomation *automation, IUIAutomationCo
                 break;
             }
 
+            int process = 0;
+            IUIAutomationElement_get_CachedProcessId(element, &process);
+            if ((DWORD)process == GetCurrentProcessId()) {
+                IUIAutomationElement_Release(element);
+                continue;
+            }
+
             BOOL offscreen = FALSE, focusable = FALSE;
             CONTROLTYPEID type = 0;
             RECT bounds;
@@ -220,6 +227,7 @@ static DWORD WINAPI layout_worker(void *context)
         SUCCEEDED(IUIAutomation_CreateCacheRequest(automation, &cache)) &&
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_BoundingRectanglePropertyId)) &&
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_ControlTypePropertyId)) &&
+        SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_ProcessIdPropertyId)) &&
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_IsKeyboardFocusablePropertyId)) &&
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_IsOffscreenPropertyId))) {
         while (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {

@@ -76,7 +76,7 @@ void view_fonts_init(ViewFonts *fonts, UINT dpi);
 void view_fonts_close(ViewFonts *fonts);
 bool view_high_contrast(void);
 void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused,
-                    bool strip_unplaced);
+                    const wchar_t *strip_status);
 bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
                 StripSurface *surface, const Monitor *monitor, bool paused);
 void view_strip_preview(HDC dc, RECT bounds, const StripLayout *layout, StripSurface *surface);

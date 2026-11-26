@@ -273,7 +273,7 @@ static void draw_load_card(HDC dc, const ViewFonts *fonts, Palette colors, int x
 }
 
 void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused,
-                    bool strip_unplaced)
+                    const wchar_t *strip_status)
 {
     PaintBuffer buffer;
     paint_begin(window, &buffer);
@@ -307,7 +307,7 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
                  count == 1 ? L"adapter" : L"adapters");
     }
     text_at(dc, box(fonts, 23, 407, 429, 20), fonts->regular, colors.muted,
-            strip_unplaced ? L"Taskbar strip is waiting for a clear space." : status, DT_LEFT);
+            strip_status ? strip_status : status, DT_LEFT);
     paint_end(window, &buffer);
 }
 

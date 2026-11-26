@@ -1,4 +1,4 @@
-# Stillmeter 1.5.1
+# Stillmeter 1.5.2
 
 Stillmeter is a portable Windows monitor for download and upload rates, CPU load, and physical RAM use. It samples once per second and shows the most recent 60 seconds of traffic in the dashboard.
 
@@ -9,7 +9,7 @@ Stillmeter is a portable Windows monitor for download and upload rates, CPU load
 3. Close the dashboard to leave Stillmeter running in the notification area. Click its tray icon to reopen the dashboard. Windows may initially place the icon under the hidden-icons arrow.
 4. Use the dashboard or the tray menu to hide the strip or pause sampling. Right-click the tray icon and choose **Exit Stillmeter** to close the application. Pause and strip visibility are session settings.
 
-The two-row strip is centered vertically inside a clear section of the horizontal primary taskbar. Its click-through window uses a transparent background. Stillmeter reads local Windows accessibility bounds to avoid Start, Search, pinned apps, widgets, and the notification area. It uses a smaller layout when needed and hides if it cannot find a safe fit, the taskbar retracts, or an app fills the screen. Tray access stays available through Windows. Opening Start or Search keeps the current strip visible while the taskbar is shown.
+The two-row strip is centered vertically inside a clear section of the horizontal primary taskbar. Its click-through window uses a transparent background. Stillmeter reads local Windows accessibility bounds to avoid Start, Search, pinned apps, widgets, and the notification area. It uses a smaller layout when needed and hides when there is no safe fit or Windows hides the taskbar. When Windows allows attachment, the strip follows the taskbar’s own stacking order during Start and Search. The dashboard identifies when Stillmeter is using its standalone overlay fallback. Tray access stays available through Windows.
 
 Both executables are unsigned. Check your organization's application policy before running either build on a managed device. The source is included under `Source/`.
 
@@ -32,7 +32,7 @@ GPU utilization is the busiest GPU engine, using local Windows performance count
 - The app makes zero outbound connections. Traffic rates come from the Windows IP Helper interface table and contain byte counts only.
 - No telemetry, update requests, packet capture, host lookup, server, or account setup.
 - Traffic history lives in memory. Only strip appearance settings are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
-- The app runs in its own process with native Windows controls, ASLR, DEP, Control Flow Guard, and system-directory DLL loading. The strip uses its own window and leaves Explorer untouched.
+- The app runs in its own process with native Windows controls, ASLR, DEP, Control Flow Guard, and system-directory DLL loading. The strip uses public Win32 window APIs to attach from Stillmeter’s separate process.
 - `SHA256SUMS.txt` contains the executable hashes. PowerShell can verify either file with `Get-FileHash .\Stillmeter.exe -Algorithm SHA256`.
 
 ## Build from source
