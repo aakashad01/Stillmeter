@@ -2,9 +2,15 @@
 
 Stillmeter is a portable Windows monitor for download and upload rates, CPU load, and physical RAM use. It samples once per second and shows the most recent 60 seconds of traffic in the dashboard.
 
+## Download
+
+[Download Stillmeter 1.5.2 for Windows (ZIP)](https://github.com/aakashad01/Stillmeter/archive/refs/tags/v1.5.2.zip)
+
+The ZIP includes both Windows executables, source code, and SHA-256 checksums. See the [v1.5.2 release notes](https://github.com/aakashad01/Stillmeter/releases/tag/v1.5.2).
+
 ## Run
 
-1. Extract the full ZIP to a local folder.
+1. Extract the downloaded ZIP to a local folder.
 2. Open `Windows-x64/Stillmeter.exe` on an Intel or AMD laptop. On a Windows ARM laptop, open `Windows-ARM64/Stillmeter.exe`. The build targets Windows 10 version 1607 or later and Windows 11.
 3. Close the dashboard to leave Stillmeter running in the notification area. Click its tray icon to reopen the dashboard. Windows may initially place the icon under the hidden-icons arrow.
 4. Use the dashboard or the tray menu to hide the strip or pause sampling. Right-click the tray icon and choose **Exit Stillmeter** to close the application. Pause and strip visibility are session settings.
@@ -38,3 +44,7 @@ GPU utilization is the busiest GPU engine, using local Windows performance count
 ## Build from source
 
 Run `sh build.sh` in `Source/` with LLVM-MinGW 20251104 UCRT on the build machine's PATH. It writes both architectures under `Source/build/`. The script uses the toolchain already present and has no package-fetch step. The finished executables use standard Windows components.
+
+## License
+
+Stillmeter is available under the [MIT License](LICENSE).
