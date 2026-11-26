@@ -1,4 +1,5 @@
 #include "view.h"
+#include "taskbar.h"
 
 #include <shellapi.h>
 #include <windowsx.h>
@@ -161,36 +162,27 @@ static bool strip_bounds(RECT *target, UINT *dpi)
         !IntersectRect(&visible, &position, &monitor_info.rcMonitor))
         return false;
 
-    *dpi = window_dpi(taskbar);
-    const RECT screen = monitor_info.rcMonitor;
-    const int width = scale(STRIP_WIDTH, *dpi);
-    const int height = scale(STRIP_HEIGHT, *dpi);
-    const int gap = scale(2, *dpi);
-    const int taskbar_width = visible.right - visible.left;
     const int taskbar_height = visible.bottom - visible.top;
-    int x, y;
-
-    if (taskbar_width >= taskbar_height) {
-        if (taskbar_height < scale(16, *dpi)) return false;
-        x = visible.left + gap;
-        const bool top = visible.top - screen.top < screen.bottom - visible.bottom;
-        y = top ? visible.bottom + gap : visible.top - height - gap;
-    } else {
-        if (taskbar_width < scale(16, *dpi)) return false;
-        const bool left = visible.left - screen.left < screen.right - visible.right;
-        x = left ? visible.right + gap : visible.left - width - gap;
-        y = screen.bottom - height - gap;
-    }
-
-    *target = (RECT){x, y, x + width, y + height};
-    RECT dashboard, overlap;
-    if (GetForegroundWindow() == app.dashboard && IsWindowVisible(app.dashboard) &&
-        GetWindowRect(app.dashboard, &dashboard) && IntersectRect(&overlap, &dashboard, target))
+    const int taskbar_width = visible.right - visible.left;
+    const UINT native_dpi = window_dpi(taskbar);
+    if (taskbar_width < taskbar_height || taskbar_height < scale(28, native_dpi) ||
+        fullscreen_on(monitor, &monitor_info.rcMonitor))
         return false;
 
-    return target->left >= screen.left && target->right <= screen.right &&
-           target->top >= screen.top && target->bottom <= screen.bottom &&
-           !fullscreen_on(monitor, &screen);
+    *dpi = native_dpi;
+    const int padding = scale(4, native_dpi);
+    const UINT height_dpi = (UINT)((taskbar_height - 2) * USER_DEFAULT_SCREEN_DPI / STRIP_HEIGHT);
+    if (height_dpi < *dpi) *dpi = height_dpi;
+    if (taskbar_layout_place(taskbar, &position, &visible, scale(STRIP_WIDTH, *dpi),
+                             scale(STRIP_HEIGHT, *dpi), padding, target))
+        return true;
+
+    // Use the same layout at a smaller size if taskbar controls leave a narrow gap.
+    const UINT compact_dpi = native_dpi * 87 / 100;
+    if (compact_dpi >= *dpi) return false;
+    *dpi = compact_dpi;
+    return taskbar_layout_place(taskbar, &position, &visible, scale(STRIP_WIDTH, *dpi),
+                                 scale(STRIP_HEIGHT, *dpi), padding, target);
 }
 
 static void position_strip(void)
@@ -210,7 +202,16 @@ static void position_strip(void)
     }
 
     RECT current;
-    if (!shown || !GetWindowRect(app.strip, &current) || !EqualRect(&current, &desired)) {
+    bool behind_taskbar = false;
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+    if (shown && taskbar)
+        for (HWND other = GetWindow(app.strip, GW_HWNDPREV); other; other = GetWindow(other, GW_HWNDPREV))
+            if (other == taskbar) {
+                behind_taskbar = true;
+                break;
+            }
+
+    if (!shown || behind_taskbar || !GetWindowRect(app.strip, &current) || !EqualRect(&current, &desired)) {
         SetWindowPos(app.strip, HWND_TOPMOST, desired.left, desired.top,
                      desired.right - desired.left, desired.bottom - desired.top,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
@@ -229,6 +230,7 @@ static void refresh(void)
     if (!app.paused && !app.suspended) monitor_sample(&app.monitor);
     if (!app.tray_added) add_tray(app.dashboard);
     update_tray();
+    if (app.strip_enabled && !app.suspended) taskbar_layout_request();
     position_strip();
     repaint();
 }
@@ -261,6 +263,7 @@ static void handle_command(UINT command)
         break;
     case TOGGLE_STRIP:
         app.strip_enabled = !app.strip_enabled;
+        if (app.strip_enabled) taskbar_layout_request();
         SetWindowTextW(app.strip_button, app.strip_enabled ? L"&Hide taskbar strip" : L"&Show taskbar strip");
         position_strip();
         repaint();
@@ -300,7 +303,8 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         layout_buttons(window);
         return 0;
     case WM_PAINT:
-        view_dashboard(window, &app.dashboard_fonts, &app.monitor, app.paused);
+        view_dashboard(window, &app.dashboard_fonts, &app.monitor, app.paused,
+                       app.strip_enabled && !IsWindowVisible(app.strip));
         return 0;
     case WM_ERASEBKGND:
         return 1;
@@ -340,6 +344,9 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
             }
         }
         return TRUE;
+    case TASKBAR_LAYOUT_EVENT:
+        position_strip();
+        return 0;
     case TRAY_EVENT:
         handle_tray_event(wparam, lparam);
         return 0;
@@ -415,9 +422,7 @@ static bool create_windows(void)
     if (height > available_height) height = available_height;
     const int edge = scale(13, dpi);
     const int x = display.rcWork.right - width - edge;
-    const int strip_space = scale(STRIP_HEIGHT + 14, dpi);
-    const int bottom_gap = available_height - height >= strip_space ? strip_space : edge;
-    const int y = display.rcWork.bottom - height - bottom_gap;
+    const int y = display.rcWork.bottom - height - edge;
     app.dashboard = CreateWindowExW(ex_style, DASHBOARD_CLASS, APP_NAME, style,
                        x > display.rcWork.left ? x : display.rcWork.left,
                        y > display.rcWork.top ? y : display.rcWork.top,
@@ -428,7 +433,8 @@ static bool create_windows(void)
                                 WS_EX_LAYERED | WS_EX_TRANSPARENT,
                                 STRIP_CLASS, L"Stillmeter taskbar strip", WS_POPUP,
                                 0, 0, 0, 0, NULL, NULL, app.instance, NULL);
-    if (!app.strip || !SetLayeredWindowAttributes(app.strip, 0, 255, LWA_ALPHA)) {
+    if (!app.strip || !SetLayeredWindowAttributes(app.strip, STRIP_COLOR_KEY, 0, LWA_COLORKEY) ||
+        !taskbar_layout_start(app.dashboard)) {
         if (app.strip) DestroyWindow(app.strip);
         app.strip = NULL;
         app.strip_enabled = false;
@@ -483,6 +489,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
     }
 
     if (app.dashboard && IsWindow(app.dashboard)) DestroyWindow(app.dashboard);
+    taskbar_layout_stop();
     view_fonts_close(&app.dashboard_fonts);
     view_fonts_close(&app.strip_fonts);
     monitor_close(&app.monitor);

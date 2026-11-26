@@ -19,11 +19,11 @@ typedef struct {
     RECT bounds;
 } PaintBuffer;
 
-static HFONT make_font(int pixels, int weight, UINT dpi)
+static HFONT make_font(int pixels, int weight, UINT dpi, DWORD quality)
 {
     HFONT font = CreateFontW(-MulDiv(pixels, (int)dpi, 96), 0, 0, 0, weight,
                             FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            CLIP_DEFAULT_PRECIS, quality,
                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     return font ? font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 }
@@ -42,11 +42,11 @@ void view_fonts_init(ViewFonts *fonts, UINT dpi)
 {
     if (fonts->dpi == dpi) return;
     view_fonts_close(fonts);
-    fonts->heading = make_font(25, FW_SEMIBOLD, dpi);
-    fonts->regular = make_font(13, FW_NORMAL, dpi);
-    fonts->label = make_font(12, FW_SEMIBOLD, dpi);
-    fonts->value = make_font(26, FW_SEMIBOLD, dpi);
-    fonts->strip = make_font(12, FW_NORMAL, dpi);
+    fonts->heading = make_font(25, FW_SEMIBOLD, dpi, CLEARTYPE_QUALITY);
+    fonts->regular = make_font(13, FW_NORMAL, dpi, CLEARTYPE_QUALITY);
+    fonts->label = make_font(12, FW_SEMIBOLD, dpi, CLEARTYPE_QUALITY);
+    fonts->value = make_font(26, FW_SEMIBOLD, dpi, CLEARTYPE_QUALITY);
+    fonts->strip = make_font(12, FW_NORMAL, dpi, NONANTIALIASED_QUALITY);
     fonts->dpi = dpi;
 }
 
@@ -273,7 +273,8 @@ static void draw_load_card(HDC dc, const ViewFonts *fonts, Palette colors, int x
     }
 }
 
-void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused)
+void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused,
+                    bool strip_unplaced)
 {
     PaintBuffer buffer;
     paint_begin(window, &buffer);
@@ -306,7 +307,8 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
         swprintf(status, STATUS_LENGTH, L"Local counters  \u00b7  %lu active %ls", count,
                  count == 1 ? L"adapter" : L"adapters");
     }
-    text_at(dc, box(fonts, 23, 407, 429, 20), fonts->regular, colors.muted, status, DT_LEFT);
+    text_at(dc, box(fonts, 23, 407, 429, 20), fonts->regular, colors.muted,
+            strip_unplaced ? L"Taskbar strip is waiting for a clear space." : status, DT_LEFT);
     paint_end(window, &buffer);
 }
 
@@ -325,12 +327,14 @@ void view_strip(HWND window, const ViewFonts *fonts, const Monitor *monitor, boo
     HDC dc = buffer.canvas;
     Palette colors = palette(true);
     if (!view_high_contrast()) {
-        colors.background = RGB(28, 28, 28);
-        colors.border = RGB(58, 58, 58);
+        DWORD light = 0, size = sizeof(light);
+        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"SystemUsesLightTheme", RRF_RT_REG_DWORD, NULL, &light, &size);
+        colors.text = light ? RGB(25, 25, 25) : RGB(245, 245, 245);
+        colors.border = light ? RGB(103, 103, 103) : RGB(124, 124, 124);
     }
-    solid(dc, &buffer.bounds, colors.background);
-    line(dc, 0, buffer.bounds.bottom - 1,
-         buffer.bounds.right, buffer.bounds.bottom - 1, colors.border);
+    if (colors.text == STRIP_COLOR_KEY) colors.text = RGB(245, 245, 245);
+    solid(dc, &buffer.bounds, STRIP_COLOR_KEY);
 
     if (paused) {
         strip_metric(dc, fonts, colors, 7, 9, 340, L"Stillmeter", L"  |  Sampling paused");
@@ -352,14 +356,14 @@ void view_strip(HWND window, const ViewFonts *fonts, const Monitor *monitor, boo
         swprintf(frequency, 24, L"%.2f GHz", monitor->cpu_mhz / 1000.0);
 
     strip_metric(dc, fonts, colors, 7, 1, 87, L"\u2191 ", upload);
-    strip_metric(dc, fonts, colors, 7, 17, 87, L"\u2193 ", download);
+    strip_metric(dc, fonts, colors, 7, 16, 87, L"\u2193 ", download);
     strip_metric(dc, fonts, colors, 97, 1, 68, L"CPU ", cpu);
-    strip_metric(dc, fonts, colors, 97, 17, 68, L"RAM ", memory);
+    strip_metric(dc, fonts, colors, 97, 16, 68, L"RAM ", memory);
     strip_metric(dc, fonts, colors, 169, 1, 106, L"GPU ", gpu);
-    strip_metric(dc, fonts, colors, 169, 17, 106, L"CPU freq ", frequency);
+    strip_metric(dc, fonts, colors, 169, 16, 106, L"CPU freq ", frequency);
     line(dc, px(fonts, 279), px(fonts, 4), px(fonts, 279), px(fonts, 30), colors.border);
     strip_metric(dc, fonts, colors, 287, 1, 71, L"Total traffic", L"");
-    strip_metric(dc, fonts, colors, 287, 17, 71, L"", total);
+    strip_metric(dc, fonts, colors, 287, 16, 71, L"", total);
     paint_end(window, &buffer);
 }
 
