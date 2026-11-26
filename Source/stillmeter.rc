@@ -4,8 +4,8 @@
 101 ICON "stillmeter.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,4,0,0
- PRODUCTVERSION 1,4,0,0
+ FILEVERSION 1,5,0,0
+ PRODUCTVERSION 1,5,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0
  FILEOS 0x40004L
@@ -17,11 +17,11 @@
      BLOCK "040904b0"
      BEGIN
        VALUE "FileDescription", "Stillmeter system monitor"
-       VALUE "FileVersion", "1.4.0.0"
+       VALUE "FileVersion", "1.5.0.0"
        VALUE "InternalName", "Stillmeter"
        VALUE "OriginalFilename", "Stillmeter.exe"
        VALUE "ProductName", "Stillmeter"
-       VALUE "ProductVersion", "1.4.0.0"
+       VALUE "ProductVersion", "1.5.0.0"
      END
    END
    BLOCK "VarFileInfo"
@@ -30,24 +30,39 @@
    END
  END
 
-IDD_STRIP_APPEARANCE DIALOGEX 0, 0, 246, 151
+
+IDD_STRIP_APPEARANCE DIALOGEX 0, 0, 333, 256
 STYLE 0x80000000 | 0x00C00000 | 0x00080000 | 0x00000800 | 0x00000040
 EXSTYLE 0x00000001
 CAPTION "Taskbar strip appearance"
 FONT 9, "Segoe UI"
 BEGIN
-    LTEXT "&Font size", -1, 12, 15, 84, 10
-    EDITTEXT IDC_STRIP_FONT_SIZE, 101, 12, 37, 14, 0x00010000 | 0x2000
-    LTEXT "9 to 20 px", -1, 149, 15, 84, 10
-    LTEXT "&Column spacing", -1, 12, 38, 84, 10
-    EDITTEXT IDC_STRIP_COLUMN_GAP, 101, 35, 37, 14, 0x00010000 | 0x2000
-    LTEXT "0 to 24 px", -1, 149, 38, 84, 10
-    LTEXT "&Row spacing", -1, 12, 61, 84, 10
-    EDITTEXT IDC_STRIP_ROW_GAP, 101, 58, 37, 14, 0x00010000 | 0x2000
-    LTEXT "0 to 12 px", -1, 149, 61, 84, 10
-    LTEXT "Values scale with Windows display settings. Text shrinks when the taskbar has limited space.", -1, 12, 84, 222, 24
-    PUSHBUTTON "&Defaults", IDC_STRIP_DEFAULTS, 12, 124, 54, 16
-    PUSHBUTTON "&Apply", IDC_STRIP_APPLY, 78, 124, 48, 16
-    DEFPUSHBUTTON "OK", 1, 132, 124, 48, 16
-    PUSHBUTTON "Cancel", 2, 186, 124, 48, 16
+    LTEXT "&Preset", -1, 12, 16, 33, 10
+    COMBOBOX IDC_STRIP_PRESET, 48, 12, 104, 80, 0x00010000 | 0x0003 | 0x00200000
+    GROUPBOX "Metrics", -1, 12, 38, 148, 83
+    AUTOCHECKBOX "Upload and download", IDC_STRIP_NETWORK, 21, 52, 128, 11, 0x00010000
+    AUTOCHECKBOX "CPU and memory", IDC_STRIP_SYSTEM, 21, 68, 128, 11, 0x00010000
+    AUTOCHECKBOX "GPU and CPU frequency", IDC_STRIP_GRAPHICS, 21, 84, 128, 11, 0x00010000
+    AUTOCHECKBOX "Total traffic", IDC_STRIP_TOTAL, 21, 100, 128, 11, 0x00010000
+    GROUPBOX "Layout", -1, 171, 38, 150, 83
+    LTEXT "R&ows", -1, 180, 55, 53, 10
+    COMBOBOX IDC_STRIP_ROWS, 236, 51, 76, 65, 0x00010000 | 0x0003
+    LTEXT "Taskbar &side", -1, 180, 75, 53, 10
+    COMBOBOX IDC_STRIP_ALIGNMENT, 236, 71, 76, 65, 0x00010000 | 0x0003
+    LTEXT "Font &weight", -1, 180, 95, 53, 10
+    COMBOBOX IDC_STRIP_WEIGHT, 236, 91, 76, 65, 0x00010000 | 0x0003
+    GROUPBOX "Size and spacing (px)", -1, 12, 129, 309, 38
+    LTEXT "&Font size", -1, 21, 145, 47, 10
+    EDITTEXT IDC_STRIP_FONT_SIZE, 68, 142, 29, 14, 0x00010000 | 0x2000
+    LTEXT "&Column gap", -1, 113, 145, 54, 10
+    EDITTEXT IDC_STRIP_COLUMN_GAP, 169, 142, 29, 14, 0x00010000 | 0x2000
+    LTEXT "Row &gap", -1, 218, 145, 48, 10
+    EDITTEXT IDC_STRIP_ROW_GAP, 270, 142, 29, 14, 0x00010000 | 0x2000
+    LTEXT "Preview with sample readings", -1, 12, 175, 168, 10
+    CONTROL "", IDC_STRIP_PREVIEW, "Static", 0x0000000D, 12, 188, 309, 29
+    LTEXT "", IDC_STRIP_HINT, 12, 221, 309, 10
+    PUSHBUTTON "&Defaults", IDC_STRIP_DEFAULTS, 12, 235, 54, 15
+    PUSHBUTTON "&Apply", IDC_STRIP_APPLY, 161, 235, 49, 15
+    DEFPUSHBUTTON "OK", 1, 217, 235, 49, 15
+    PUSHBUTTON "Cancel", 2, 272, 235, 49, 15
 END

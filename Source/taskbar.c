@@ -21,24 +21,29 @@ static HANDLE worker;
 static HANDLE events[2];
 
 bool taskbar_find_gap(const RECT *visible, const RECT *occupied, unsigned count,
-                      int width, int height, int padding, RECT *slot)
+                      int width, int height, int padding, bool align_right, RECT *slot)
 {
     if (width <= 0 || height <= 0 || visible->bottom - visible->top < height)
         return false;
 
     const LONG top = visible->top + (visible->bottom - visible->top - height) / 2;
-    const LONG right_limit = visible->right - padding;
-    LONG left = visible->left + padding;
-    while (left + width <= right_limit) {
+    // Mirror coordinates to run the same gap search from either side.
+    const LONG start = align_right ? -visible->right : visible->left;
+    const LONG end = align_right ? -visible->left : visible->right;
+    LONG left = start + padding;
+    while (left + width <= end - padding) {
         LONG next = left;
         for (unsigned i = 0; i < count; ++i) {
             const RECT *control = &occupied[i];
             if (control->top >= top + height || control->bottom <= top) continue;
-            if (left + width > control->left - padding && left < control->right + padding)
-                if (control->right + padding > next) next = control->right + padding;
+            const LONG control_left = align_right ? -control->right : control->left;
+            const LONG control_right = align_right ? -control->left : control->right;
+            if (left + width > control_left - padding && left < control_right + padding)
+                if (control_right + padding > next) next = control_right + padding;
         }
         if (next == left) {
-            *slot = (RECT){left, top, left + width, top + height};
+            const LONG x = align_right ? -left - width : left;
+            *slot = (RECT){x, top, x + width, top + height};
             return true;
         }
         left = next;
@@ -215,14 +220,14 @@ void taskbar_layout_stop(void)
 }
 
 bool taskbar_layout_place(HWND window, const RECT *bounds, const RECT *visible,
-                          int width, int height, int padding, RECT *slot)
+                          int width, int height, int padding, bool align_right, RECT *slot)
 {
     AcquireSRWLockShared(&layout_lock);
     const bool placed = layout.complete && layout.taskbar == window &&
                        EqualRect(bounds, &layout.bounds) &&
                        GetTickCount64() - layout.measured <= LAYOUT_MAX_AGE_MS &&
                        taskbar_find_gap(visible, layout.occupied, layout.count,
-                                        width, height, padding, slot);
+                                        width, height, padding, align_right, slot);
     ReleaseSRWLockShared(&layout_lock);
     return placed;
 }

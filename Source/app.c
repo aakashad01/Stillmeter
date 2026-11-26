@@ -18,7 +18,7 @@
 #define SHOW_DASHBOARD_EVENT (WM_APP + 2)
 #define LAYOUT_POLL_MS 2000
 #define APPEARANCE_KEY L"Software\\Stillmeter"
-#define APPEARANCE_VALUE L"StripAppearance"
+#define APPEARANCE_VALUE L"StripAppearanceV2"
 
 enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP, STRIP_APPEARANCE };
 
@@ -47,12 +47,19 @@ typedef struct {
 
 static Application app;
 
-static const StripAppearance default_appearance = {12, 6, 1};
+static const StripAppearance appearance_presets[] = {
+    {12, 6, 1, STRIP_ALL_GROUPS, 2, 0, 1},
+    {11, 3, 0, STRIP_NETWORK | STRIP_SYSTEM, 2, 0, 1},
+    {16, 6, 2, STRIP_NETWORK | STRIP_SYSTEM, 1, 0, 2}
+};
 
 static bool appearance_valid(const StripAppearance *value)
 {
     return value->font_size >= 9 && value->font_size <= 20 &&
-           value->column_gap <= 24 && value->row_gap <= 12;
+           value->column_gap <= 24 && value->row_gap <= 12 &&
+           value->groups > 0 && value->groups <= STRIP_ALL_GROUPS &&
+           (value->rows == 1 || value->rows == 2) && value->align_right <= 1 &&
+           value->weight <= 2;
 }
 
 static StripAppearance load_appearance(void)
@@ -63,7 +70,18 @@ static StripAppearance load_appearance(void)
                      RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
         bytes == sizeof(saved) && appearance_valid(&saved))
         return saved;
-    return default_appearance;
+    // Preserve the three appearance fields stored by versions 1.3 and 1.4.
+    DWORD legacy[3];
+    bytes = sizeof(legacy);
+    saved = appearance_presets[0];
+    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, L"StripAppearance",
+                     RRF_RT_REG_BINARY, NULL, legacy, &bytes) == ERROR_SUCCESS &&
+        bytes == sizeof(legacy)) {
+        saved.font_size = legacy[0];
+        saved.column_gap = legacy[1];
+        saved.row_gap = legacy[2];
+    }
+    return appearance_valid(&saved) ? saved : appearance_presets[0];
 }
 
 static bool save_appearance(const StripAppearance *appearance)
@@ -225,7 +243,7 @@ static const StripLayout *strip_bounds(RECT *target)
         StripLayout *layout = &app.strip_layouts[i];
         if (view_strip_prepare(layout, &app.appearance, layout_dpi[i], taskbar_height - 2) &&
             taskbar_layout_place(taskbar, &position, &visible, layout->width,
-                                 layout->height, padding, target))
+                                 layout->height, padding, app.appearance.align_right != 0, target))
             return layout;
     }
     return NULL;
@@ -308,11 +326,34 @@ static void layout_buttons(HWND window)
                scale(117, dpi), scale(29, dpi), TRUE);
 }
 
-static void fill_appearance_dialog(HWND dialog, const StripAppearance *value)
+typedef struct {
+    bool filling;
+    StripLayout preview_layout;
+    StripSurface preview_surface;
+    const StripLayout *preview;
+} AppearanceDialog;
+
+static void fill_appearance_dialog(HWND dialog, AppearanceDialog *state, const StripAppearance *value)
 {
+    state->filling = true;
     SetDlgItemInt(dialog, IDC_STRIP_FONT_SIZE, value->font_size, FALSE);
     SetDlgItemInt(dialog, IDC_STRIP_COLUMN_GAP, value->column_gap, FALSE);
     SetDlgItemInt(dialog, IDC_STRIP_ROW_GAP, value->row_gap, FALSE);
+    for (unsigned i = 0; i < 4; ++i)
+        CheckDlgButton(dialog, IDC_STRIP_NETWORK + (int)i,
+                       value->groups & (1u << i) ? BST_CHECKED : BST_UNCHECKED);
+    SendDlgItemMessageW(dialog, IDC_STRIP_ROWS, CB_SETCURSEL, value->rows - 1, 0);
+    SendDlgItemMessageW(dialog, IDC_STRIP_ALIGNMENT, CB_SETCURSEL, value->align_right, 0);
+    SendDlgItemMessageW(dialog, IDC_STRIP_WEIGHT, CB_SETCURSEL, value->weight, 0);
+    WPARAM preset = 0;
+    for (unsigned i = 0; i < sizeof(appearance_presets) / sizeof(*appearance_presets); ++i) {
+        if (strip_appearance_equal(value, &appearance_presets[i])) {
+            preset = i + 1;
+            break;
+        }
+    }
+    SendDlgItemMessageW(dialog, IDC_STRIP_PRESET, CB_SETCURSEL, preset, 0);
+    state->filling = false;
 }
 
 static bool read_appearance_field(HWND dialog, int id, DWORD *value)
@@ -325,35 +366,106 @@ static bool read_appearance_field(HWND dialog, int id, DWORD *value)
     return true;
 }
 
+static bool read_appearance_dialog(HWND dialog, StripAppearance *value)
+{
+    *value = (StripAppearance){0};
+    value->rows = (DWORD)(SendDlgItemMessageW(dialog, IDC_STRIP_ROWS, CB_GETCURSEL, 0, 0) + 1);
+    value->align_right = (DWORD)SendDlgItemMessageW(dialog, IDC_STRIP_ALIGNMENT, CB_GETCURSEL, 0, 0);
+    value->weight = (DWORD)SendDlgItemMessageW(dialog, IDC_STRIP_WEIGHT, CB_GETCURSEL, 0, 0);
+    for (unsigned i = 0; i < 4; ++i)
+        if (IsDlgButtonChecked(dialog, IDC_STRIP_NETWORK + (int)i) == BST_CHECKED)
+            value->groups |= 1u << i;
+    return read_appearance_field(dialog, IDC_STRIP_FONT_SIZE, &value->font_size) &&
+           read_appearance_field(dialog, IDC_STRIP_COLUMN_GAP, &value->column_gap) &&
+           read_appearance_field(dialog, IDC_STRIP_ROW_GAP, &value->row_gap) &&
+           appearance_valid(value);
+}
+
+static void update_appearance_preview(HWND dialog, AppearanceDialog *state)
+{
+    StripAppearance value;
+    const bool valid = read_appearance_dialog(dialog, &value);
+    EnableWindow(GetDlgItem(dialog, IDOK), valid);
+    EnableWindow(GetDlgItem(dialog, IDC_STRIP_APPLY), valid);
+    EnableWindow(GetDlgItem(dialog, IDC_STRIP_ROW_GAP), value.rows != 1);
+    SetDlgItemTextW(dialog, IDC_STRIP_HINT, valid ? L"" :
+                    value.groups ? L"Font 9–20 px, column gap 0–24 px, row gap 0–12 px."
+                                 : L"Select at least one metric group.");
+
+    const UINT dpi = window_dpi(dialog);
+    state->preview = valid && view_strip_prepare(&state->preview_layout, &value, dpi, scale(48, dpi))
+                     ? &state->preview_layout : NULL;
+    InvalidateRect(GetDlgItem(dialog, IDC_STRIP_PREVIEW), NULL, FALSE);
+}
+
+static void init_appearance_dialog(HWND dialog, AppearanceDialog *state)
+{
+    static const struct {
+        int control;
+        const wchar_t *items[5];
+    } choices[] = {
+        {IDC_STRIP_PRESET, {L"Custom", L"Balanced", L"Compact", L"Large text", NULL}},
+        {IDC_STRIP_ROWS, {L"One row", L"Two rows", NULL}},
+        {IDC_STRIP_ALIGNMENT, {L"Left", L"Right", NULL}},
+        {IDC_STRIP_WEIGHT, {L"Regular", L"Semibold", L"Bold", NULL}}
+    };
+    for (unsigned i = 0; i < sizeof(choices) / sizeof(*choices); ++i)
+        for (unsigned j = 0; choices[i].items[j]; ++j)
+            SendDlgItemMessageW(dialog, choices[i].control, CB_ADDSTRING, 0,
+                                (LPARAM)choices[i].items[j]);
+    SendDlgItemMessageW(dialog, IDC_STRIP_FONT_SIZE, EM_SETLIMITTEXT, 2, 0);
+    SendDlgItemMessageW(dialog, IDC_STRIP_COLUMN_GAP, EM_SETLIMITTEXT, 2, 0);
+    SendDlgItemMessageW(dialog, IDC_STRIP_ROW_GAP, EM_SETLIMITTEXT, 2, 0);
+    view_strip_theme(&state->preview_surface);
+    fill_appearance_dialog(dialog, state, &app.appearance);
+    update_appearance_preview(dialog, state);
+}
+
 static INT_PTR CALLBACK appearance_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam)
 {
-    (void)lparam;
     if (message == WM_INITDIALOG) {
-        SendDlgItemMessageW(dialog, IDC_STRIP_FONT_SIZE, EM_SETLIMITTEXT, 2, 0);
-        SendDlgItemMessageW(dialog, IDC_STRIP_COLUMN_GAP, EM_SETLIMITTEXT, 2, 0);
-        SendDlgItemMessageW(dialog, IDC_STRIP_ROW_GAP, EM_SETLIMITTEXT, 2, 0);
-        fill_appearance_dialog(dialog, &app.appearance);
+        AppearanceDialog *state = (AppearanceDialog *)lparam;
+        SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)state);
+        init_appearance_dialog(dialog, state);
         return TRUE;
     }
-    if (message != WM_COMMAND) return FALSE;
+
+    AppearanceDialog *state = (AppearanceDialog *)GetWindowLongPtrW(dialog, DWLP_USER);
+    if (!state) return FALSE;
+    if (message == WM_DRAWITEM && wparam == IDC_STRIP_PREVIEW) {
+        const DRAWITEMSTRUCT *item = (const DRAWITEMSTRUCT *)lparam;
+        view_strip_preview(item->hDC, item->rcItem, state->preview, &state->preview_surface);
+        return TRUE;
+    }
+    if (message == WM_SETTINGCHANGE || message == WM_THEMECHANGED ||
+        message == WM_SYSCOLORCHANGE || message == WM_DPICHANGED) {
+        view_strip_theme(&state->preview_surface);
+        update_appearance_preview(dialog, state);
+        return FALSE;
+    }
+    if (message != WM_COMMAND || state->filling) return FALSE;
 
     const UINT command = LOWORD(wparam);
+    const UINT notification = HIWORD(wparam);
     if (command == IDCANCEL) {
         EndDialog(dialog, IDCANCEL);
     } else if (command == IDC_STRIP_DEFAULTS) {
-        fill_appearance_dialog(dialog, &default_appearance);
+        fill_appearance_dialog(dialog, state, &appearance_presets[0]);
+        update_appearance_preview(dialog, state);
+    } else if (command == IDC_STRIP_PRESET && notification == CBN_SELCHANGE) {
+        const LRESULT index = SendDlgItemMessageW(dialog, IDC_STRIP_PRESET, CB_GETCURSEL, 0, 0);
+        if (index > 0 && index <= (LRESULT)(sizeof(appearance_presets) / sizeof(*appearance_presets)))
+            fill_appearance_dialog(dialog, state, &appearance_presets[index - 1]);
+        update_appearance_preview(dialog, state);
+    } else if ((command >= IDC_STRIP_FONT_SIZE && command <= IDC_STRIP_ROW_GAP && notification == EN_CHANGE) ||
+               (command >= IDC_STRIP_NETWORK && command <= IDC_STRIP_TOTAL && notification == BN_CLICKED) ||
+               (command >= IDC_STRIP_ROWS && command <= IDC_STRIP_WEIGHT && notification == CBN_SELCHANGE)) {
+        SendDlgItemMessageW(dialog, IDC_STRIP_PRESET, CB_SETCURSEL, 0, 0);
+        update_appearance_preview(dialog, state);
     } else if (command == IDOK || command == IDC_STRIP_APPLY) {
         StripAppearance next;
-        if (!read_appearance_field(dialog, IDC_STRIP_FONT_SIZE, &next.font_size) ||
-            !read_appearance_field(dialog, IDC_STRIP_COLUMN_GAP, &next.column_gap) ||
-            !read_appearance_field(dialog, IDC_STRIP_ROW_GAP, &next.row_gap) ||
-            !appearance_valid(&next)) {
-            MessageBoxW(dialog, L"Enter a font size of 9–20, column spacing of 0–24, "
-                        L"and row spacing of 0–12.", APP_NAME, MB_OK | MB_ICONINFORMATION);
-            return TRUE;
-        }
-        if (next.font_size != app.appearance.font_size ||
-            next.column_gap != app.appearance.column_gap || next.row_gap != app.appearance.row_gap) {
+        if (!read_appearance_dialog(dialog, &next)) return TRUE;
+        if (!strip_appearance_equal(&next, &app.appearance)) {
             app.appearance = next;
             app.placed_layout = NULL;
             position_strip();
@@ -375,10 +487,14 @@ static void handle_command(UINT command)
     case SHOW_DASHBOARD:
         show_dashboard();
         break;
-    case STRIP_APPEARANCE:
+    case STRIP_APPEARANCE: {
+        AppearanceDialog dialog = {0};
         DialogBoxParamW(app.instance, MAKEINTRESOURCEW(IDD_STRIP_APPEARANCE),
-                        app.dashboard, appearance_proc, 0);
+                        app.dashboard, appearance_proc, (LPARAM)&dialog);
+        view_strip_layout_close(&dialog.preview_layout);
+        view_strip_surface_close(&dialog.preview_surface);
         break;
+    }
     case TOGGLE_STRIP:
         app.strip_enabled = !app.strip_enabled;
         if (app.strip_enabled) request_layout(true);

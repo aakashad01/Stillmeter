@@ -1,4 +1,4 @@
-# Stillmeter 1.4
+# Stillmeter 1.5
 
 Stillmeter is a portable Windows monitor for download and upload rates, CPU load, and physical RAM use. It samples once per second and shows the most recent 60 seconds of traffic in the dashboard.
 
@@ -15,7 +15,9 @@ Both executables are unsigned. Check your organization's application policy befo
 
 ## Taskbar appearance
 
-Open **Strip appearance** from the dashboard or the tray context menu. Set the font size (9–20 px), column spacing (0–24 px), and row spacing (0–12 px). Use **Apply** to see changes, or **Defaults** to restore the starting values. Sizes scale with the monitor DPI. The strip uses smaller text or tighter row spacing when the taskbar is too short to fit the requested values.
+Open **Strip appearance** from the dashboard or tray menu. Start with Balanced, Compact, or Large text, then adjust the settings in the preview. You can show or hide four metric groups, choose one or two rows, prefer the left or right side of the taskbar, and set the font weight, font size (9–20 px), column spacing (0–24 px), and row spacing (0–12 px). Apply saves the changes and keeps the dialog open. Cancel discards edits made since the last Apply. Defaults restores the Balanced preset.
+
+Sizes scale with monitor DPI. The preview uses sample readings. Actual placement depends on the taskbar controls and the space available. The strip may use smaller text or tighter row spacing to fit.
 
 The strip draws semibold, anti-aliased text with transparent edges and scales for the monitor's DPI. Stillmeter reuses its drawing buffers and measured columns. Taskbar accessibility checks run every two seconds during normal use and are also requested when display settings or Explorer change. Metric sampling remains once per second.
 
@@ -29,7 +31,7 @@ GPU utilization is the busiest GPU engine, using local Windows performance count
 
 - The app makes zero outbound connections. Traffic rates come from the Windows IP Helper interface table and contain byte counts only.
 - No telemetry, update requests, packet capture, host lookup, server, or account setup.
-- Traffic history lives in memory. Only font size and spacing are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
+- Traffic history lives in memory. Only strip appearance settings are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
 - The app runs in its own process with native Windows controls, ASLR, DEP, Control Flow Guard, and system-directory DLL loading. The strip uses its own window and leaves Explorer untouched.
 - `SHA256SUMS.txt` contains the executable hashes. PowerShell can verify either file with `Get-FileHash .\Stillmeter.exe -Algorithm SHA256`.
 

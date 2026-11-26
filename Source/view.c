@@ -324,13 +324,51 @@ void view_strip_layout_close(StripLayout *layout)
     *layout = (StripLayout){0};
 }
 
+static const wchar_t *const strip_labels[8] = {
+    L"\u2191 ", L"\u2193 ", L"CPU ", L"RAM ", L"GPU ", L"CPU freq ", L"Total traffic", L""
+};
+
+static const wchar_t *const strip_examples[8] = {
+    L"\u2191 999.9 MB/s", L"\u2193 999.9 MB/s", L"CPU 100%", L"RAM 100%",
+    L"GPU 100%", L"CPU freq 99.99 GHz", L"Total traffic", L"999.9 TB"
+};
+
+static int text_extent(HDC dc, const wchar_t *text)
+{
+    SIZE extent;
+    if (!GetTextExtentPoint32W(dc, text, (int)wcslen(text), &extent)) return 0;
+    return (extent.cx + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE;
+}
+
+static void measure_columns(StripLayout *layout, HDC dc, int inset)
+{
+    const StripAppearance *appearance = &layout->appearance;
+    layout->width = 2 * layout->padding;
+    unsigned col = 0;
+    for (unsigned group = 0; group < 4; ++group) {
+        if (!(appearance->groups & (1u << group))) continue;
+        int upper = text_extent(dc, strip_examples[2 * group]);
+        int lower = text_extent(dc, strip_examples[2 * group + 1]);
+        if (group == 3 && appearance->rows == 1) {
+            upper = text_extent(dc, L"Total 999.9 TB");
+            lower = 0;
+        }
+        if (appearance->rows == 1 && group != 3) {
+            layout->column_width[col++] = upper + 2 * inset;
+            layout->column_width[col++] = lower + 2 * inset;
+        } else {
+            layout->column_width[col++] = (upper > lower ? upper : lower) + 2 * inset;
+        }
+    }
+    for (unsigned i = 0; i < col; ++i)
+        layout->width += layout->column_width[i] + (i ? layout->column_gap : 0);
+}
+
 bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
                         UINT dpi, int height_limit)
 {
     if (layout->dpi == dpi && layout->height_limit == height_limit &&
-        layout->appearance.font_size == appearance->font_size &&
-        layout->appearance.column_gap == appearance->column_gap &&
-        layout->appearance.row_gap == appearance->row_gap)
+        strip_appearance_equal(&layout->appearance, appearance))
         return layout->font != NULL;
 
     view_strip_layout_close(layout);
@@ -339,46 +377,29 @@ bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
     layout->height_limit = height_limit;
     layout->padding = MulDiv(4, (int)dpi, 96);
     const int inset = MulDiv(1, (int)dpi, 96);
-    layout->row_gap = MulDiv((int)appearance->row_gap, (int)dpi, 96);
+    layout->row_gap = appearance->rows == 2 ? MulDiv((int)appearance->row_gap, (int)dpi, 96) : 0;
     layout->column_gap = MulDiv((int)appearance->column_gap, (int)dpi, 96);
     HDC dc = GetDC(NULL);
     if (!dc) return false;
 
-    static const wchar_t *const samples[4][3] = {
-        {L"\u2191 999.9 MB/s", L"\u2193 999.9 GB/s", L"\u2193 999.9 TB/s"},
-        {L"CPU 100%", L"RAM 100%", NULL},
-        {L"GPU 100%", L"CPU freq 99.99 GHz", NULL},
-        {L"Total traffic", L"999.9 TB", NULL}
-    };
+    static const int weights[] = {FW_NORMAL, FW_SEMIBOLD, FW_BOLD};
     int size = MulDiv((int)appearance->font_size, (int)dpi, 96);
     const int minimum = MulDiv(9, (int)dpi, 96);
     for (; size >= minimum; --size) {
-        HFONT font = make_font(size * STRIP_SUPERSAMPLE, FW_SEMIBOLD, 96, ANTIALIASED_QUALITY);
+        HFONT font = make_font(size * STRIP_SUPERSAMPLE, weights[appearance->weight], 96, ANTIALIASED_QUALITY);
         HGDIOBJ old_font = SelectObject(dc, font);
         TEXTMETRICW metrics;
         if (old_font && GetTextMetricsW(dc, &metrics)) {
             int gap = layout->row_gap;
             const int row_height = (metrics.tmHeight + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE;
-            const int remaining = height_limit - 2 * (row_height + inset);
+            const int remaining = height_limit - (int)appearance->rows * row_height - 2 * inset;
             // Prefer the requested row spacing while keeping text legible.
             if (remaining >= gap || (size == minimum && remaining >= 0)) {
                 if (gap > remaining) gap = remaining;
                 layout->row_gap = gap;
                 layout->row_height = row_height;
-                layout->height = 2 * (layout->row_height + inset) + gap;
-                layout->width = 2 * layout->padding + 3 * layout->column_gap;
-                for (unsigned col = 0; col < 4; ++col) {
-                    int width = 0;
-                    for (unsigned i = 0; i < 3 && samples[col][i]; ++i) {
-                        const wchar_t *sample = samples[col][i];
-                        SIZE extent;
-                        if (GetTextExtentPoint32W(dc, sample, (int)wcslen(sample), &extent) &&
-                            extent.cx > width)
-                            width = extent.cx;
-                    }
-                    layout->column_width[col] = (width + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE + inset * 2;
-                    layout->width += layout->column_width[col];
-                }
+                layout->height = height_limit - remaining + gap;
+                measure_columns(layout, dc, inset);
                 layout->font = font;
             }
         }
@@ -451,11 +472,13 @@ void view_strip_theme(StripSurface *surface)
     COLORREF foreground;
     if (view_high_contrast()) {
         foreground = GetSysColor(COLOR_WINDOWTEXT);
+        surface->background = GetSysColor(COLOR_WINDOW);
     } else {
         DWORD light = 0, size = sizeof(light);
         RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, NULL, &light, &size);
         foreground = light ? RGB(25, 25, 25) : RGB(250, 250, 250);
+        surface->background = light ? RGB(235, 238, 242) : RGB(28, 28, 31);
     }
 
     // UpdateLayeredWindow expects premultiplied color in BGRA byte order.
@@ -503,31 +526,43 @@ static void draw_strip_mask(HDC dc, const StripLayout *layout, const Monitor *mo
     if (monitor->cpu_mhz > 0.0)
         swprintf(frequency, 24, L"%.2f GHz", monitor->cpu_mhz / 1000.0);
 
-    const wchar_t *const labels[] = {
-        L"\u2191 ", L"\u2193 ", L"CPU ", L"RAM ", L"GPU ", L"CPU freq ", L"Total traffic", L""
-    };
     const wchar_t *const values[] = {upload, download, cpu, memory, gpu, frequency, L"", total};
-    const int top = (layout->height - 2 * layout->row_height - layout->row_gap) / 2;
+    const StripAppearance *appearance = &layout->appearance;
+    const int top = (layout->height - (int)appearance->rows * layout->row_height - layout->row_gap) / 2;
     const int bottom = top + layout->row_height + layout->row_gap;
     int x = layout->padding;
-    for (unsigned col = 0; col < 4; ++col) {
-        if (col == 3 && layout->column_gap >= 4) {
-            const int separator = x - layout->column_gap / 2;
-            const RECT rule = {separator * STRIP_SUPERSAMPLE, top * STRIP_SUPERSAMPLE,
-                               (separator + 1) * STRIP_SUPERSAMPLE,
-                               (bottom + layout->row_height) * STRIP_SUPERSAMPLE};
-            solid(dc, &rule, RGB(125, 125, 125));
+    unsigned col = 0;
+    for (unsigned group = 0; group < 4; ++group) {
+        if (!(appearance->groups & (1u << group))) continue;
+        const unsigned first = group * 2;
+        if (appearance->rows == 1) {
+            if (group == 3) {
+                strip_metric(dc, layout, x, top, layout->column_width[col], L"Total ", total);
+                break;
+            }
+            for (unsigned item = first; item < first + 2; ++item) {
+                const int width = layout->column_width[col++];
+                strip_metric(dc, layout, x, top, width, strip_labels[item], values[item]);
+                x += width + layout->column_gap;
+            }
+        } else {
+            const int width = layout->column_width[col++];
+            if (group == 3 && col > 1 && layout->column_gap >= 4) {
+                const int divider = x - layout->column_gap / 2;
+                const RECT rule = {divider * STRIP_SUPERSAMPLE, top * STRIP_SUPERSAMPLE,
+                                   (divider + 1) * STRIP_SUPERSAMPLE,
+                                   (bottom + layout->row_height) * STRIP_SUPERSAMPLE};
+                solid(dc, &rule, RGB(125, 125, 125));
+            }
+            strip_metric(dc, layout, x, top, width, strip_labels[first], values[first]);
+            strip_metric(dc, layout, x, bottom, width, strip_labels[first + 1], values[first + 1]);
+            x += width + layout->column_gap;
         }
-        const int width = layout->column_width[col];
-        strip_metric(dc, layout, x, top, width, labels[2 * col], values[2 * col]);
-        strip_metric(dc, layout, x, bottom, width,
-                     labels[2 * col + 1], values[2 * col + 1]);
-        x += width + layout->column_gap;
     }
 }
 
-bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
-                StripSurface *surface, const Monitor *monitor, bool paused)
+static bool rasterize_strip(const StripLayout *layout, StripSurface *surface,
+                             const Monitor *monitor, bool paused)
 {
     if (!layout || !layout->font || !strip_surface_prepare(surface, layout->width, layout->height))
         return false;
@@ -547,6 +582,13 @@ bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
         }
     }
 
+    return true;
+}
+
+bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
+                StripSurface *surface, const Monitor *monitor, bool paused)
+{
+    if (!rasterize_strip(layout, surface, monitor, paused)) return false;
     POINT destination;
     if (position) destination = *position;
     SIZE size = {layout->width, layout->height};
@@ -554,6 +596,35 @@ bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     return UpdateLayeredWindow(window, NULL, position ? &destination : NULL, &size, surface->image.dc,
                                &source, 0, &blend, ULW_ALPHA) != FALSE;
+}
+
+void view_strip_preview(HDC dc, RECT bounds, const StripLayout *layout, StripSurface *surface)
+{
+    solid(dc, &bounds, surface->background);
+    static const Monitor sample = {
+        .cpu = 24, .memory = 58, .gpu = 12, .cpu_mhz = 3200, .session_bytes = 485000000.0,
+        .traffic = {.download = 3200000.0, .upload = 482000.0, .available = true}
+    };
+    if (!layout || !rasterize_strip(layout, surface, &sample, false)) return;
+
+    const int inset = MulDiv(5, (int)layout->dpi, 96);
+    const int available_width = bounds.right - bounds.left - 2 * inset;
+    const int available_height = bounds.bottom - bounds.top - 2 * inset;
+    if (available_width <= 0 || available_height <= 0) return;
+    int width = surface->width, height = surface->height;
+    if (width > available_width) {
+        height = MulDiv(height, available_width, width);
+        width = available_width;
+    }
+    if (height > available_height) {
+        width = MulDiv(width, available_height, height);
+        height = available_height;
+    }
+    const int x = layout->appearance.align_right ? bounds.right - inset - width : bounds.left + inset;
+    const int y = bounds.top + (bounds.bottom - bounds.top - height) / 2;
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    AlphaBlend(dc, x, y, width, height, surface->image.dc, 0, 0,
+               surface->width, surface->height, blend);
 }
 
 void view_tooltip(const Monitor *monitor, bool paused, wchar_t output[TOOLTIP_LENGTH])

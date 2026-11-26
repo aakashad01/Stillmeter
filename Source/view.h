@@ -2,6 +2,7 @@
 #define STILLMETER_VIEW_H
 
 #include "monitor.h"
+#include <string.h>
 
 #define DASHBOARD_WIDTH 476
 #define DASHBOARD_HEIGHT 474
@@ -16,11 +17,27 @@ typedef struct {
     UINT dpi;
 } ViewFonts;
 
+enum {
+    STRIP_NETWORK = 1, STRIP_SYSTEM = 2, STRIP_GRAPHICS = 4, STRIP_TOTAL = 8,
+    STRIP_ALL_GROUPS = 15
+};
+
 typedef struct {
     DWORD font_size;
     DWORD column_gap;
     DWORD row_gap;
+    DWORD groups;
+    DWORD rows;
+    DWORD align_right;
+    DWORD weight;
 } StripAppearance;
+
+_Static_assert(sizeof(StripAppearance) == 7 * sizeof(DWORD), "Appearance format must be stable");
+
+static inline bool strip_appearance_equal(const StripAppearance *a, const StripAppearance *b)
+{
+    return memcmp(a, b, sizeof(*a)) == 0;
+}
 
 typedef struct {
     HFONT font;
@@ -32,7 +49,7 @@ typedef struct {
     int row_height;
     int row_gap;
     int column_gap;
-    int column_width[4];
+    int column_width[7];
 } StripLayout;
 
 typedef struct {
@@ -46,6 +63,7 @@ typedef struct {
     StripBitmap mask, image;
     int width, height;
     DWORD palette[256];
+    COLORREF background;
 } StripSurface;
 
 bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
@@ -61,6 +79,7 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
                     bool strip_unplaced);
 bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
                 StripSurface *surface, const Monitor *monitor, bool paused);
+void view_strip_preview(HDC dc, RECT bounds, const StripLayout *layout, StripSurface *surface);
 void view_tooltip(const Monitor *monitor, bool paused, wchar_t output[TOOLTIP_LENGTH]);
 
 #endif
