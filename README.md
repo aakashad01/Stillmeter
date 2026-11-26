@@ -1,4 +1,4 @@
-# Stillmeter 1.2
+# Stillmeter 1.3
 
 Stillmeter is a portable Windows monitor for download and upload rates, CPU load, and physical RAM use. It samples once per second and shows the most recent 60 seconds of traffic in the dashboard.
 
@@ -13,16 +13,23 @@ The two-row strip is centered vertically inside a clear section of the horizonta
 
 Both executables are unsigned. Check your organization's application policy before running either build on a managed device. The source is included under `Source/`.
 
+## Taskbar appearance
+
+Open **Strip appearance** from the dashboard or the tray context menu. Set the font size (9–20 px), column spacing (0–24 px), and row spacing (0–12 px). Use **Apply** to see changes, or **Defaults** to restore the starting values. Sizes scale with the monitor DPI. The strip uses smaller text or tighter row spacing when the taskbar is too short to fit the requested values.
+
+Stillmeter reuses the strip's drawing buffer and measured columns. Taskbar accessibility checks run every two seconds during normal use and are also requested when display settings or Explorer change. Metric sampling remains once per second.
+
 ## Readings
 
 Download and upload are in bytes per second, using decimal units. Stillmeter sums active physical Wi-Fi and Ethernet adapters. VPN traffic is reflected in the physical adapter totals as it moves across the connection. Virtual adapters, loopback, and cellular adapters are excluded. An em dash means a reading is unavailable or waiting for a baseline. RAM percentage is calculated from total and available physical memory.
- GPU utilization is the busiest GPU engine, using local Windows performance counters. CPU frequency is the Windows reported processor frequency. A dash indicates an unavailable reading. Total traffic counts upload and download during the current Stillmeter session.
+
+GPU utilization is the busiest GPU engine, using local Windows performance counters. CPU frequency is the Windows reported processor frequency. A dash indicates an unavailable reading. Total traffic counts upload and download during the current Stillmeter session.
 
 ## Local operation
 
 - The app makes zero outbound connections. Traffic rates come from the Windows IP Helper interface table and contain byte counts only.
 - No telemetry, update requests, packet capture, host lookup, server, or account setup.
-- Traffic history lives in memory. Stillmeter writes no settings or monitoring logs, adds no startup entries, and requests no elevated permissions.
+- Traffic history lives in memory. Only font size and spacing are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
 - The app runs in its own process with native Windows controls, ASLR, DEP, Control Flow Guard, and system-directory DLL loading. The strip uses its own window and leaves Explorer untouched.
 - `SHA256SUMS.txt` contains the executable hashes. PowerShell can verify either file with `Get-FileHash .\Stillmeter.exe -Algorithm SHA256`.
 

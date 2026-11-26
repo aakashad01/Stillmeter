@@ -1,7 +1,9 @@
 #include "view.h"
 #include "taskbar.h"
+#include "resource.h"
 
 #include <shellapi.h>
+#include <stdlib.h>
 #include <windowsx.h>
 
 #define APP_NAME L"Stillmeter"
@@ -14,10 +16,11 @@
 #define TRAY_ICON 1
 #define TRAY_EVENT (WM_APP + 1)
 #define SHOW_DASHBOARD_EVENT (WM_APP + 2)
-#define STRIP_WIDTH 364
-#define STRIP_HEIGHT 34
+#define LAYOUT_POLL_MS 2000
+#define APPEARANCE_KEY L"Software\\Stillmeter"
+#define APPEARANCE_VALUE L"StripAppearance"
 
-enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP };
+enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP, STRIP_APPEARANCE };
 
 typedef struct {
     HINSTANCE instance;
@@ -25,8 +28,13 @@ typedef struct {
     HWND strip;
     HWND strip_button;
     HWND pause_button;
+    HWND appearance_button;
     ViewFonts dashboard_fonts;
-    ViewFonts strip_fonts;
+    StripAppearance appearance;
+    StripLayout strip_layouts[2];
+    const StripLayout *placed_layout;
+    StripSurface strip_surface;
+    ULONGLONG last_layout_request;
     Monitor monitor;
     UINT taskbar_created;
     bool tray_added;
@@ -38,6 +46,47 @@ typedef struct {
 } Application;
 
 static Application app;
+
+static const StripAppearance default_appearance = {12, 6, 1};
+
+static bool appearance_valid(const StripAppearance *value)
+{
+    return value->font_size >= 9 && value->font_size <= 20 &&
+           value->column_gap <= 24 && value->row_gap <= 12;
+}
+
+static StripAppearance load_appearance(void)
+{
+    StripAppearance saved;
+    DWORD bytes = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, APPEARANCE_VALUE,
+                     RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
+        bytes == sizeof(saved) && appearance_valid(&saved))
+        return saved;
+    return default_appearance;
+}
+
+static bool save_appearance(const StripAppearance *appearance)
+{
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, APPEARANCE_KEY, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return false;
+    const LSTATUS status = RegSetValueExW(key, APPEARANCE_VALUE, 0, REG_BINARY,
+                                         (const BYTE *)appearance, sizeof(*appearance));
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS;
+}
+
+static void request_layout(bool force)
+{
+    if (!app.strip_enabled || app.suspended) return;
+    const ULONGLONG now = GetTickCount64();
+    if (force || !app.last_layout_request || now - app.last_layout_request >= LAYOUT_POLL_MS) {
+        app.last_layout_request = now;
+        taskbar_layout_request();
+    }
+}
 
 static int scale(int value, UINT dpi)
 {
@@ -100,6 +149,7 @@ static void tray_menu(POINT position)
     AppendMenuW(menu, MF_STRING | (app.strip_enabled ? MF_CHECKED : MF_UNCHECKED) |
                 (app.strip ? MF_ENABLED : MF_GRAYED),
                 TOGGLE_STRIP, L"Show taskbar strip");
+    AppendMenuW(menu, MF_STRING, STRIP_APPEARANCE, L"Strip appearance…");
     AppendMenuW(menu, MF_STRING, TOGGLE_PAUSE, app.paused ? L"Resume sampling" : L"Pause sampling");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, EXIT_APP, L"Exit Stillmeter");
@@ -150,39 +200,35 @@ static bool fullscreen_on(HMONITOR monitor, const RECT *screen)
            client.right >= screen->right && client.bottom >= screen->bottom;
 }
 
-static bool strip_bounds(RECT *target, UINT *dpi)
+static const StripLayout *strip_bounds(RECT *target)
 {
-    if (!app.strip_enabled || app.suspended) return false;
+    if (!app.strip_enabled || app.suspended) return NULL;
     const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (!taskbar || !IsWindowVisible(taskbar)) return false;
+    if (!taskbar || !IsWindowVisible(taskbar)) return NULL;
     const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONULL);
     MONITORINFO monitor_info = {.cbSize = sizeof(monitor_info)};
     RECT position, visible;
     if (!monitor || !GetMonitorInfoW(monitor, &monitor_info) || !GetWindowRect(taskbar, &position) ||
         !IntersectRect(&visible, &position, &monitor_info.rcMonitor))
-        return false;
+        return NULL;
 
     const int taskbar_height = visible.bottom - visible.top;
     const int taskbar_width = visible.right - visible.left;
     const UINT native_dpi = window_dpi(taskbar);
     if (taskbar_width < taskbar_height || taskbar_height < scale(28, native_dpi) ||
         fullscreen_on(monitor, &monitor_info.rcMonitor))
-        return false;
+        return NULL;
 
-    *dpi = native_dpi;
     const int padding = scale(4, native_dpi);
-    const UINT height_dpi = (UINT)((taskbar_height - 2) * USER_DEFAULT_SCREEN_DPI / STRIP_HEIGHT);
-    if (height_dpi < *dpi) *dpi = height_dpi;
-    if (taskbar_layout_place(taskbar, &position, &visible, scale(STRIP_WIDTH, *dpi),
-                             scale(STRIP_HEIGHT, *dpi), padding, target))
-        return true;
-
-    // Use the same layout at a smaller size if taskbar controls leave a narrow gap.
-    const UINT compact_dpi = native_dpi * 87 / 100;
-    if (compact_dpi >= *dpi) return false;
-    *dpi = compact_dpi;
-    return taskbar_layout_place(taskbar, &position, &visible, scale(STRIP_WIDTH, *dpi),
-                                 scale(STRIP_HEIGHT, *dpi), padding, target);
+    const UINT layout_dpi[] = {native_dpi, native_dpi * 87 / 100};
+    for (unsigned i = 0; i < 2; ++i) {
+        StripLayout *layout = &app.strip_layouts[i];
+        if (view_strip_prepare(layout, &app.appearance, layout_dpi[i], taskbar_height - 2) &&
+            taskbar_layout_place(taskbar, &position, &visible, layout->width,
+                                 layout->height, padding, target))
+            return layout;
+    }
+    return NULL;
 }
 
 static void position_strip(void)
@@ -191,14 +237,10 @@ static void position_strip(void)
 
     const bool shown = IsWindowVisible(app.strip) != FALSE;
     RECT desired;
-    UINT dpi = USER_DEFAULT_SCREEN_DPI;
-    if (!strip_bounds(&desired, &dpi)) {
+    app.placed_layout = strip_bounds(&desired);
+    if (!app.placed_layout) {
         if (shown) ShowWindow(app.strip, SW_HIDE);
         return;
-    }
-
-    if (app.strip_fonts.dpi != dpi) {
-        view_fonts_init(&app.strip_fonts, dpi);
     }
 
     RECT current;
@@ -230,7 +272,7 @@ static void refresh(void)
     if (!app.paused && !app.suspended) monitor_sample(&app.monitor);
     if (!app.tray_added) add_tray(app.dashboard);
     update_tray();
-    if (app.strip_enabled && !app.suspended) taskbar_layout_request();
+    request_layout(false);
     position_strip();
     repaint();
 }
@@ -253,6 +295,70 @@ static void layout_buttons(HWND window)
                scale(156, dpi), scale(29, dpi), TRUE);
     MoveWindow(app.pause_button, scale(187, dpi), scale(431, dpi),
                scale(141, dpi), scale(29, dpi), TRUE);
+    SendMessageW(app.appearance_button, WM_SETFONT, (WPARAM)app.dashboard_fonts.regular, TRUE);
+    MoveWindow(app.appearance_button, scale(337, dpi), scale(431, dpi),
+               scale(117, dpi), scale(29, dpi), TRUE);
+}
+
+static void fill_appearance_dialog(HWND dialog, const StripAppearance *value)
+{
+    SetDlgItemInt(dialog, IDC_STRIP_FONT_SIZE, value->font_size, FALSE);
+    SetDlgItemInt(dialog, IDC_STRIP_COLUMN_GAP, value->column_gap, FALSE);
+    SetDlgItemInt(dialog, IDC_STRIP_ROW_GAP, value->row_gap, FALSE);
+}
+
+static bool read_appearance_field(HWND dialog, int id, DWORD *value)
+{
+    wchar_t input[8];
+    const int length = GetDlgItemTextW(dialog, id, input, 8);
+    if (length < 1 || length > 2 || wcsspn(input, L"0123456789") != (size_t)length)
+        return false;
+    *value = wcstoul(input, NULL, 10);
+    return true;
+}
+
+static INT_PTR CALLBACK appearance_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    (void)lparam;
+    if (message == WM_INITDIALOG) {
+        SendDlgItemMessageW(dialog, IDC_STRIP_FONT_SIZE, EM_SETLIMITTEXT, 2, 0);
+        SendDlgItemMessageW(dialog, IDC_STRIP_COLUMN_GAP, EM_SETLIMITTEXT, 2, 0);
+        SendDlgItemMessageW(dialog, IDC_STRIP_ROW_GAP, EM_SETLIMITTEXT, 2, 0);
+        fill_appearance_dialog(dialog, &app.appearance);
+        return TRUE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+
+    const UINT command = LOWORD(wparam);
+    if (command == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+    } else if (command == IDC_STRIP_DEFAULTS) {
+        fill_appearance_dialog(dialog, &default_appearance);
+    } else if (command == IDOK || command == IDC_STRIP_APPLY) {
+        StripAppearance next;
+        if (!read_appearance_field(dialog, IDC_STRIP_FONT_SIZE, &next.font_size) ||
+            !read_appearance_field(dialog, IDC_STRIP_COLUMN_GAP, &next.column_gap) ||
+            !read_appearance_field(dialog, IDC_STRIP_ROW_GAP, &next.row_gap) ||
+            !appearance_valid(&next)) {
+            MessageBoxW(dialog, L"Enter a font size of 9–20, column spacing of 0–24, "
+                        L"and row spacing of 0–12.", APP_NAME, MB_OK | MB_ICONINFORMATION);
+            return TRUE;
+        }
+        if (next.font_size != app.appearance.font_size ||
+            next.column_gap != app.appearance.column_gap || next.row_gap != app.appearance.row_gap) {
+            app.appearance = next;
+            app.placed_layout = NULL;
+            position_strip();
+            repaint();
+            if (!save_appearance(&next))
+                MessageBoxW(dialog, L"Appearance was applied for this run. "
+                            L"Windows couldn't save it.", APP_NAME, MB_OK | MB_ICONINFORMATION);
+        }
+        if (command == IDOK) EndDialog(dialog, IDOK);
+    } else {
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static void handle_command(UINT command)
@@ -261,9 +367,13 @@ static void handle_command(UINT command)
     case SHOW_DASHBOARD:
         show_dashboard();
         break;
+    case STRIP_APPEARANCE:
+        DialogBoxParamW(app.instance, MAKEINTRESOURCEW(IDD_STRIP_APPEARANCE),
+                        app.dashboard, appearance_proc, 0);
+        break;
     case TOGGLE_STRIP:
         app.strip_enabled = !app.strip_enabled;
-        if (app.strip_enabled) taskbar_layout_request();
+        if (app.strip_enabled) request_layout(true);
         SetWindowTextW(app.strip_button, app.strip_enabled ? L"&Hide taskbar strip" : L"&Show taskbar strip");
         position_strip();
         repaint();
@@ -287,6 +397,7 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
     if (app.taskbar_created && message == app.taskbar_created) {
         app.tray_added = false;
         add_tray(window);
+        request_layout(true);
         position_strip();
         return 0;
     }
@@ -299,7 +410,10 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         app.pause_button = CreateWindowExW(0, L"BUTTON", L"&Pause sampling",
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                 0, 0, 0, 0, window, (HMENU)(INT_PTR)TOGGLE_PAUSE, app.instance, NULL);
-        if (!app.strip_button || !app.pause_button) return -1;
+        app.appearance_button = CreateWindowExW(0, L"BUTTON", L"Strip &appearance…",
+                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                0, 0, 0, 0, window, (HMENU)(INT_PTR)STRIP_APPEARANCE, app.instance, NULL);
+        if (!app.strip_button || !app.pause_button || !app.appearance_button) return -1;
         layout_buttons(window);
         return 0;
     case WM_PAINT:
@@ -328,6 +442,9 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
     case WM_SYSCOLORCHANGE:
+    case WM_THEMECHANGED:
+        view_strip_theme(&app.strip_surface);
+        request_layout(true);
         position_strip();
         repaint();
         break;
@@ -340,6 +457,7 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
             if (app.suspended) {
                 app.suspended = false;
+                request_layout(true);
                 refresh();
             }
         }
@@ -378,7 +496,7 @@ static LRESULT CALLBACK strip_proc(HWND window, UINT message, WPARAM wparam, LPA
 {
     switch (message) {
     case WM_PAINT:
-        view_strip(window, &app.strip_fonts, &app.monitor, app.paused);
+        view_strip(window, app.placed_layout, &app.strip_surface, &app.monitor, app.paused);
         return 0;
     case WM_ERASEBKGND:
         return 1;
@@ -467,6 +585,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
 
     app.instance = instance;
     app.strip_enabled = true;
+    app.appearance = load_appearance();
+    view_strip_theme(&app.strip_surface);
     app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     monitor_init(&app.monitor);
 
@@ -491,7 +611,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
     if (app.dashboard && IsWindow(app.dashboard)) DestroyWindow(app.dashboard);
     taskbar_layout_stop();
     view_fonts_close(&app.dashboard_fonts);
-    view_fonts_close(&app.strip_fonts);
+    view_strip_layout_close(&app.strip_layouts[0]);
+    view_strip_layout_close(&app.strip_layouts[1]);
+    view_strip_surface_close(&app.strip_surface);
     monitor_close(&app.monitor);
     if (single_instance) CloseHandle(single_instance);
     return exit_code;
