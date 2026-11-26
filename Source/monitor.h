@@ -5,6 +5,7 @@
 #include <ws2ipdef.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <pdh.h>
 
 #include "meter.h"
 
@@ -16,6 +17,14 @@ typedef struct {
     TrafficHistory history;
     int cpu;
     int memory;
+    int gpu;
+    double cpu_mhz;
+    double session_bytes;
+    PDH_HQUERY local_query;
+    PDH_HCOUNTER gpu_counter;
+    PDH_HCOUNTER frequency_counter;
+    void *gpu_samples;
+    DWORD gpu_capacity;
     uint64_t memory_used;
     uint64_t memory_total;
     bool network_readable;

@@ -46,7 +46,7 @@ void view_fonts_init(ViewFonts *fonts, UINT dpi)
     fonts->regular = make_font(13, FW_NORMAL, dpi);
     fonts->label = make_font(12, FW_SEMIBOLD, dpi);
     fonts->value = make_font(26, FW_SEMIBOLD, dpi);
-    fonts->strip = make_font(13, FW_SEMIBOLD, dpi);
+    fonts->strip = make_font(12, FW_NORMAL, dpi);
     fonts->dpi = dpi;
 }
 
@@ -310,37 +310,56 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
     paint_end(window, &buffer);
 }
 
+static void strip_metric(HDC dc, const ViewFonts *fonts, Palette colors, int x, int y,
+                         int width, const wchar_t *label, const wchar_t *value)
+{
+    wchar_t text[48];
+    swprintf(text, 48, L"%ls%ls", label, value);
+    text_at(dc, box(fonts, x, y, width, 16), fonts->strip, colors.text, text, DT_LEFT);
+}
+
 void view_strip(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused)
 {
     PaintBuffer buffer;
     paint_begin(window, &buffer);
     HDC dc = buffer.canvas;
-    const Palette colors = palette(true);
+    Palette colors = palette(true);
+    if (!view_high_contrast()) {
+        colors.background = RGB(28, 28, 28);
+        colors.border = RGB(58, 58, 58);
+    }
     solid(dc, &buffer.bounds, colors.background);
-    card(dc, fonts, buffer.bounds, colors);
+    line(dc, 0, buffer.bounds.bottom - 1,
+         buffer.bounds.right, buffer.bounds.bottom - 1, colors.border);
 
     if (paused) {
-        text_at(dc, box(fonts, 0, 0, 202, 43), fonts->strip, colors.muted,
-                L"Stillmeter  \u00b7  Paused", DT_CENTER);
+        strip_metric(dc, fonts, colors, 7, 9, 340, L"Stillmeter", L"  |  Sampling paused");
         paint_end(window, &buffer);
         return;
     }
 
-    wchar_t download[RATE_TEXT_LENGTH], upload[RATE_TEXT_LENGTH], cpu[8], memory[8];
+    wchar_t download[RATE_TEXT_LENGTH], upload[RATE_TEXT_LENGTH], total[RATE_TEXT_LENGTH];
+    wchar_t cpu[8], memory[8], gpu[8], frequency[24] = L"\u2014";
     format_rate(monitor->traffic, false, download);
     format_rate(monitor->traffic, true, upload);
+    format_rate((TrafficRate){.download = monitor->session_bytes, .available = true}, false, total);
+    wchar_t *per_second = wcsstr(total, L"/s");
+    if (per_second) *per_second = L'\0';
     percent_text(monitor->cpu, cpu);
     percent_text(monitor->memory, memory);
+    percent_text(monitor->gpu, gpu);
+    if (monitor->cpu_mhz > 0.0)
+        swprintf(frequency, 24, L"%.2f GHz", monitor->cpu_mhz / 1000.0);
 
-    text_at(dc, box(fonts, 11, 4, 18, 17), fonts->strip, colors.download, L"\u2193", DT_LEFT);
-    text_at(dc, box(fonts, 11, 22, 18, 17), fonts->strip, colors.upload, L"\u2191", DT_LEFT);
-    text_at(dc, box(fonts, 30, 4, 85, 17), fonts->strip, colors.text, download, DT_RIGHT);
-    text_at(dc, box(fonts, 30, 22, 85, 17), fonts->strip, colors.text, upload, DT_RIGHT);
-    line(dc, px(fonts, 125), px(fonts, 7), px(fonts, 125), px(fonts, 36), colors.border);
-    text_at(dc, box(fonts, 134, 4, 31, 17), fonts->label, colors.muted, L"CPU", DT_LEFT);
-    text_at(dc, box(fonts, 134, 22, 31, 17), fonts->label, colors.muted, L"RAM", DT_LEFT);
-    text_at(dc, box(fonts, 162, 4, 31, 17), fonts->strip, colors.text, cpu, DT_RIGHT);
-    text_at(dc, box(fonts, 162, 22, 31, 17), fonts->strip, colors.text, memory, DT_RIGHT);
+    strip_metric(dc, fonts, colors, 7, 1, 87, L"\u2191 ", upload);
+    strip_metric(dc, fonts, colors, 7, 17, 87, L"\u2193 ", download);
+    strip_metric(dc, fonts, colors, 97, 1, 68, L"CPU ", cpu);
+    strip_metric(dc, fonts, colors, 97, 17, 68, L"RAM ", memory);
+    strip_metric(dc, fonts, colors, 169, 1, 106, L"GPU ", gpu);
+    strip_metric(dc, fonts, colors, 169, 17, 106, L"CPU freq ", frequency);
+    line(dc, px(fonts, 279), px(fonts, 4), px(fonts, 279), px(fonts, 30), colors.border);
+    strip_metric(dc, fonts, colors, 287, 1, 71, L"Total traffic", L"");
+    strip_metric(dc, fonts, colors, 287, 17, 71, L"", total);
     paint_end(window, &buffer);
 }
 

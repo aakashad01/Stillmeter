@@ -13,8 +13,8 @@
 #define TRAY_ICON 1
 #define TRAY_EVENT (WM_APP + 1)
 #define SHOW_DASHBOARD_EVENT (WM_APP + 2)
-#define STRIP_WIDTH 202
-#define STRIP_HEIGHT 43
+#define STRIP_WIDTH 364
+#define STRIP_HEIGHT 34
 
 enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP };
 
@@ -165,14 +165,14 @@ static bool strip_bounds(RECT *target, UINT *dpi)
     const RECT screen = monitor_info.rcMonitor;
     const int width = scale(STRIP_WIDTH, *dpi);
     const int height = scale(STRIP_HEIGHT, *dpi);
-    const int gap = scale(7, *dpi);
+    const int gap = scale(2, *dpi);
     const int taskbar_width = visible.right - visible.left;
     const int taskbar_height = visible.bottom - visible.top;
     int x, y;
 
     if (taskbar_width >= taskbar_height) {
         if (taskbar_height < scale(16, *dpi)) return false;
-        x = screen.right - width - gap;
+        x = visible.left + gap;
         const bool top = visible.top - screen.top < screen.bottom - visible.bottom;
         y = top ? visible.bottom + gap : visible.top - height - gap;
     } else {
@@ -207,10 +207,6 @@ static void position_strip(void)
 
     if (app.strip_fonts.dpi != dpi) {
         view_fonts_init(&app.strip_fonts, dpi);
-        const int radius = scale(13, dpi);
-        HRGN region = CreateRoundRectRgn(0, 0, desired.right - desired.left,
-                                       desired.bottom - desired.top, radius, radius);
-        if (region && !SetWindowRgn(app.strip, region, TRUE)) DeleteObject(region);
     }
 
     RECT current;

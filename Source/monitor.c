@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <pdhmsg.h>
 
 static uint64_t file_time_value(FILETIME value)
 {
@@ -102,10 +103,84 @@ static void sample_network(Monitor *monitor, uint64_t elapsed_ms)
     monitor->current_capacity = capacity;
 }
 
+static const wchar_t *gpu_engine_key(const PDH_FMT_COUNTERVALUE_ITEM_W *item)
+{
+    const wchar_t *key = wcsstr(item->szName, L"_luid_");
+    return key ? key : item->szName;
+}
+
+static int compare_gpu_engines(const void *first, const void *second)
+{
+    return wcscmp(gpu_engine_key(first), gpu_engine_key(second));
+}
+
+static bool valid_counter(DWORD status)
+{
+    return status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA;
+}
+
+static void sample_gpu(Monitor *monitor)
+{
+    if (!monitor->gpu_counter) return;
+    DWORD bytes = monitor->gpu_capacity, count = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArrayW(monitor->gpu_counter, PDH_FMT_DOUBLE,
+                                                      &bytes, &count, monitor->gpu_samples);
+    if (status == (PDH_STATUS)PDH_MORE_DATA && bytes > monitor->gpu_capacity) {
+        void *samples = realloc(monitor->gpu_samples, bytes);
+        if (!samples) return;
+        monitor->gpu_samples = samples;
+        monitor->gpu_capacity = bytes;
+        status = PdhGetFormattedCounterArrayW(monitor->gpu_counter, PDH_FMT_DOUBLE,
+                                              &bytes, &count, samples);
+    }
+    if (status != ERROR_SUCCESS || !count) return;
+
+    PDH_FMT_COUNTERVALUE_ITEM_W *samples = monitor->gpu_samples;
+    qsort(samples, count, sizeof(*samples), compare_gpu_engines);
+    double busiest = -1.0;
+    for (DWORD i = 0; i < count;) {
+        const wchar_t *key = gpu_engine_key(&samples[i]);
+        double usage = 0;
+        bool valid = false;
+        do {
+            const PDH_FMT_COUNTERVALUE value = samples[i].FmtValue;
+            if (valid_counter(value.CStatus) && value.doubleValue >= 0.0) {
+                usage += value.doubleValue;
+                valid = true;
+            }
+            ++i;
+        } while (i < count && wcscmp(key, gpu_engine_key(&samples[i])) == 0);
+        if (valid && usage > busiest) busiest = usage;
+    }
+    if (busiest >= 0.0) monitor->gpu = busiest >= 100.0 ? 100 : (int)(busiest + 0.5);
+}
+
+static void sample_performance(Monitor *monitor, uint64_t elapsed_ms)
+{
+    monitor->gpu = -1;
+    monitor->cpu_mhz = 0.0;
+    if (!monitor->local_query || PdhCollectQueryData(monitor->local_query) != ERROR_SUCCESS)
+        return;
+
+    PDH_FMT_COUNTERVALUE frequency;
+    if (monitor->frequency_counter &&
+        PdhGetFormattedCounterValue(monitor->frequency_counter, PDH_FMT_DOUBLE, NULL,
+                                    &frequency) == ERROR_SUCCESS &&
+        valid_counter(frequency.CStatus) && frequency.doubleValue > 0.0)
+        monitor->cpu_mhz = frequency.doubleValue;
+    if (elapsed_ms && elapsed_ms <= MAX_SAMPLE_GAP_MS) sample_gpu(monitor);
+}
+
 void monitor_init(Monitor *monitor)
 {
     *monitor = (Monitor){0};
     monitor_reset(monitor);
+    if (PdhOpenQueryW(NULL, 0, &monitor->local_query) == ERROR_SUCCESS) {
+        PdhAddEnglishCounterW(monitor->local_query, L"\\GPU Engine(*)\\Utilization Percentage",
+                              0, &monitor->gpu_counter);
+        PdhAddEnglishCounterW(monitor->local_query, L"\\Processor Information(_Total)\\Processor Frequency",
+                              0, &monitor->frequency_counter);
+    }
     monitor->ip_helper = LoadLibraryExW(L"iphlpapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!monitor->ip_helper) return;
 
@@ -126,6 +201,10 @@ void monitor_sample(Monitor *monitor)
     sample_cpu(monitor, elapsed_ms);
     sample_memory(monitor);
     sample_network(monitor, elapsed_ms);
+    sample_performance(monitor, elapsed_ms);
+    if (monitor->traffic.available)
+        monitor->session_bytes += (monitor->traffic.download + monitor->traffic.upload) *
+                                  (double)elapsed_ms / 1000.0;
     history_append(&monitor->history, monitor->traffic);
 }
 
@@ -133,6 +212,8 @@ void monitor_reset(Monitor *monitor)
 {
     monitor->traffic = (TrafficRate){0};
     monitor->history = (TrafficHistory){0};
+    monitor->gpu = -1;
+    monitor->cpu_mhz = 0.0;
     monitor->cpu = -1;
     monitor->memory = -1;
     monitor->memory_used = 0;
@@ -146,6 +227,8 @@ void monitor_reset(Monitor *monitor)
 
 void monitor_close(Monitor *monitor)
 {
+    if (monitor->local_query) PdhCloseQuery(monitor->local_query);
+    free(monitor->gpu_samples);
     free(monitor->current);
     free(monitor->previous);
     if (monitor->ip_helper) FreeLibrary(monitor->ip_helper);
