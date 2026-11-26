@@ -1,4 +1,4 @@
-# Stillmeter 1.3
+# Stillmeter 1.4
 
 Stillmeter is a portable Windows monitor for download and upload rates, CPU load, and physical RAM use. It samples once per second and shows the most recent 60 seconds of traffic in the dashboard.
 
@@ -17,7 +17,7 @@ Both executables are unsigned. Check your organization's application policy befo
 
 Open **Strip appearance** from the dashboard or the tray context menu. Set the font size (9–20 px), column spacing (0–24 px), and row spacing (0–12 px). Use **Apply** to see changes, or **Defaults** to restore the starting values. Sizes scale with the monitor DPI. The strip uses smaller text or tighter row spacing when the taskbar is too short to fit the requested values.
 
-Stillmeter reuses the strip's drawing buffer and measured columns. Taskbar accessibility checks run every two seconds during normal use and are also requested when display settings or Explorer change. Metric sampling remains once per second.
+The strip draws semibold, anti-aliased text with transparent edges and scales for the monitor's DPI. Stillmeter reuses its drawing buffers and measured columns. Taskbar accessibility checks run every two seconds during normal use and are also requested when display settings or Explorer change. Metric sampling remains once per second.
 
 ## Readings
 

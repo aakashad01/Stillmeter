@@ -3,8 +3,6 @@
 
 #include "monitor.h"
 
-#define STRIP_COLOR_KEY RGB(255, 0, 128)
-
 #define DASHBOARD_WIDTH 476
 #define DASHBOARD_HEIGHT 474
 #define TOOLTIP_LENGTH 128
@@ -41,8 +39,13 @@ typedef struct {
     HDC dc;
     HBITMAP bitmap;
     HGDIOBJ original;
+    DWORD *pixels;
+} StripBitmap;
+
+typedef struct {
+    StripBitmap mask, image;
     int width, height;
-    COLORREF text, separator;
+    DWORD palette[256];
 } StripSurface;
 
 bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
@@ -56,8 +59,8 @@ void view_fonts_close(ViewFonts *fonts);
 bool view_high_contrast(void);
 void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused,
                     bool strip_unplaced);
-void view_strip(HWND window, const StripLayout *layout, StripSurface *surface,
-                const Monitor *monitor, bool paused);
+bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
+                StripSurface *surface, const Monitor *monitor, bool paused);
 void view_tooltip(const Monitor *monitor, bool paused, wchar_t output[TOOLTIP_LENGTH]);
 
 #endif

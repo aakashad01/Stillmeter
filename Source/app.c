@@ -253,18 +253,26 @@ static void position_strip(void)
                 break;
             }
 
-    if (!shown || behind_taskbar || !GetWindowRect(app.strip, &current) || !EqualRect(&current, &desired)) {
-        SetWindowPos(app.strip, HWND_TOPMOST, desired.left, desired.top,
-                     desired.right - desired.left, desired.bottom - desired.top,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+    if (!shown || !GetWindowRect(app.strip, &current) || !EqualRect(&current, &desired)) {
+        const POINT position = {desired.left, desired.top};
+        if (!view_strip(app.strip, &position, app.placed_layout, &app.strip_surface,
+                        &app.monitor, app.paused)) {
+            if (shown) ShowWindow(app.strip, SW_HIDE);
+            app.placed_layout = NULL;
+            return;
+        }
     }
+    if (!shown || behind_taskbar)
+        SetWindowPos(app.strip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
 }
 
 static void repaint(void)
 {
     if (IsWindowVisible(app.dashboard) && !IsIconic(app.dashboard))
         InvalidateRect(app.dashboard, NULL, FALSE);
-    if (IsWindowVisible(app.strip)) InvalidateRect(app.strip, NULL, FALSE);
+    if (IsWindowVisible(app.strip))
+        view_strip(app.strip, NULL, app.placed_layout, &app.strip_surface, &app.monitor, app.paused);
 }
 
 static void refresh(void)
@@ -496,7 +504,7 @@ static LRESULT CALLBACK strip_proc(HWND window, UINT message, WPARAM wparam, LPA
 {
     switch (message) {
     case WM_PAINT:
-        view_strip(window, app.placed_layout, &app.strip_surface, &app.monitor, app.paused);
+        ValidateRect(window, NULL);
         return 0;
     case WM_ERASEBKGND:
         return 1;
@@ -551,8 +559,7 @@ static bool create_windows(void)
                                 WS_EX_LAYERED | WS_EX_TRANSPARENT,
                                 STRIP_CLASS, L"Stillmeter taskbar strip", WS_POPUP,
                                 0, 0, 0, 0, NULL, NULL, app.instance, NULL);
-    if (!app.strip || !SetLayeredWindowAttributes(app.strip, STRIP_COLOR_KEY, 0, LWA_COLORKEY) ||
-        !taskbar_layout_start(app.dashboard)) {
+    if (!app.strip || !taskbar_layout_start(app.dashboard)) {
         if (app.strip) DestroyWindow(app.strip);
         app.strip = NULL;
         app.strip_enabled = false;

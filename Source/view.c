@@ -311,6 +311,8 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
     paint_end(window, &buffer);
 }
 
+#define STRIP_SUPERSAMPLE 2
+
 static void delete_strip_font(HFONT font)
 {
     if (font && font != (HFONT)GetStockObject(DEFAULT_GUI_FONT)) DeleteObject(font);
@@ -351,17 +353,18 @@ bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
     int size = MulDiv((int)appearance->font_size, (int)dpi, 96);
     const int minimum = MulDiv(9, (int)dpi, 96);
     for (; size >= minimum; --size) {
-        HFONT font = make_font(size, FW_NORMAL, 96, NONANTIALIASED_QUALITY);
+        HFONT font = make_font(size * STRIP_SUPERSAMPLE, FW_SEMIBOLD, 96, ANTIALIASED_QUALITY);
         HGDIOBJ old_font = SelectObject(dc, font);
         TEXTMETRICW metrics;
         if (old_font && GetTextMetricsW(dc, &metrics)) {
             int gap = layout->row_gap;
-            const int remaining = height_limit - 2 * (metrics.tmHeight + inset);
+            const int row_height = (metrics.tmHeight + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE;
+            const int remaining = height_limit - 2 * (row_height + inset);
             // Prefer the requested row spacing while keeping text legible.
             if (remaining >= gap || (size == minimum && remaining >= 0)) {
                 if (gap > remaining) gap = remaining;
                 layout->row_gap = gap;
-                layout->row_height = metrics.tmHeight;
+                layout->row_height = row_height;
                 layout->height = 2 * (layout->row_height + inset) + gap;
                 layout->width = 2 * layout->padding + 3 * layout->column_gap;
                 for (unsigned col = 0; col < 4; ++col) {
@@ -373,7 +376,7 @@ bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
                             extent.cx > width)
                             width = extent.cx;
                     }
-                    layout->column_width[col] = width + inset * 2;
+                    layout->column_width[col] = (width + STRIP_SUPERSAMPLE - 1) / STRIP_SUPERSAMPLE + inset * 2;
                     layout->width += layout->column_width[col];
                 }
                 layout->font = font;
@@ -388,78 +391,102 @@ bool view_strip_prepare(StripLayout *layout, const StripAppearance *appearance,
     return layout->font != NULL;
 }
 
+static void strip_bitmap_close(StripBitmap *bitmap)
+{
+    if (bitmap->original) SelectObject(bitmap->dc, bitmap->original);
+    if (bitmap->bitmap) DeleteObject(bitmap->bitmap);
+    if (bitmap->dc) DeleteDC(bitmap->dc);
+    *bitmap = (StripBitmap){0};
+}
+
 void view_strip_surface_close(StripSurface *surface)
 {
-    if (surface->bitmap) {
-        SelectObject(surface->dc, surface->original);
-        DeleteObject(surface->bitmap);
-    }
-    if (surface->dc) DeleteDC(surface->dc);
-    surface->dc = NULL;
-    surface->bitmap = NULL;
-    surface->original = NULL;
+    strip_bitmap_close(&surface->mask);
+    strip_bitmap_close(&surface->image);
     surface->width = 0;
     surface->height = 0;
 }
 
-static HDC strip_surface_dc(StripSurface *surface, HDC target, int width, int height)
+static bool strip_bitmap_create(StripBitmap *bitmap, int width, int height)
 {
-    if (surface->bitmap && surface->width == width && surface->height == height)
-        return surface->dc;
+    const BITMAPINFO info = {.bmiHeader = {
+        .biSize = sizeof(BITMAPINFOHEADER), .biWidth = width, .biHeight = -height,
+        .biPlanes = 1, .biBitCount = 32, .biCompression = BI_RGB
+    }};
+    void *pixels = NULL;
+    bitmap->dc = CreateCompatibleDC(NULL);
+    if (!bitmap->dc) return false;
+    bitmap->bitmap = CreateDIBSection(bitmap->dc, &info, DIB_RGB_COLORS, &pixels, NULL, 0);
+    if (!bitmap->bitmap || !pixels) return false;
+    bitmap->original = SelectObject(bitmap->dc, bitmap->bitmap);
+    if (!bitmap->original) return false;
 
-    // Keep the DC across resizes and replace only its bitmap on success.
-    if (!surface->dc) surface->dc = CreateCompatibleDC(target);
-    if (!surface->dc || width <= 0 || height <= 0) return target;
-    HBITMAP bitmap = CreateCompatibleBitmap(target, width, height);
-    if (!bitmap) return target;
-    HGDIOBJ previous = SelectObject(surface->dc, bitmap);
-    if (!previous) {
-        DeleteObject(bitmap);
-        return target;
+    bitmap->pixels = pixels;
+    SetBkMode(bitmap->dc, TRANSPARENT);
+    return true;
+}
+
+static bool strip_surface_prepare(StripSurface *surface, int width, int height)
+{
+    if (surface->width == width && surface->height == height) return true;
+
+    StripBitmap mask = {0}, image = {0};
+    if (!strip_bitmap_create(&mask, width * STRIP_SUPERSAMPLE, height * STRIP_SUPERSAMPLE) ||
+        !strip_bitmap_create(&image, width, height)) {
+        strip_bitmap_close(&mask);
+        strip_bitmap_close(&image);
+        return false;
     }
-    if (surface->bitmap) DeleteObject(surface->bitmap);
-    else surface->original = previous;
-    surface->bitmap = bitmap;
+
+    view_strip_surface_close(surface);
+    surface->mask = mask;
+    surface->image = image;
     surface->width = width;
     surface->height = height;
-    return surface->dc;
+    return true;
 }
 
 void view_strip_theme(StripSurface *surface)
 {
+    COLORREF foreground;
     if (view_high_contrast()) {
-        surface->text = GetSysColor(COLOR_WINDOWTEXT);
-        surface->separator = surface->text;
+        foreground = GetSysColor(COLOR_WINDOWTEXT);
     } else {
         DWORD light = 0, size = sizeof(light);
         RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, NULL, &light, &size);
-        surface->text = light ? RGB(25, 25, 25) : RGB(245, 245, 245);
-        surface->separator = light ? RGB(103, 103, 103) : RGB(124, 124, 124);
+        foreground = light ? RGB(25, 25, 25) : RGB(250, 250, 250);
     }
-    if (surface->text == STRIP_COLOR_KEY) surface->text = RGB(245, 245, 245);
-    if (surface->separator == STRIP_COLOR_KEY) surface->separator = surface->text;
+
+    // UpdateLayeredWindow expects premultiplied color in BGRA byte order.
+    for (DWORD alpha = 0; alpha < 256; ++alpha) {
+        const DWORD red = (GetRValue(foreground) * alpha + 127) / 255;
+        const DWORD green = (GetGValue(foreground) * alpha + 127) / 255;
+        const DWORD blue = (GetBValue(foreground) * alpha + 127) / 255;
+        surface->palette[alpha] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+    }
 }
 
-static void strip_metric(HDC dc, const StripLayout *layout, COLORREF color,
+static void strip_metric(HDC dc, const StripLayout *layout,
                          int x, int y, int width, const wchar_t *label, const wchar_t *value)
 {
     wchar_t text[48];
     swprintf(text, 48, L"%ls%ls", label, value);
-    RECT row = {x, y, x + width, y + layout->row_height};
-    text_at(dc, row, layout->font, color, text, DT_LEFT);
+    RECT row = {x * STRIP_SUPERSAMPLE, y * STRIP_SUPERSAMPLE,
+                (x + width) * STRIP_SUPERSAMPLE, (y + layout->row_height) * STRIP_SUPERSAMPLE};
+    text_at(dc, row, layout->font, RGB(255, 255, 255), text, DT_LEFT);
 }
 
-static void draw_strip(HDC dc, RECT bounds, const StripLayout *layout, const StripSurface *surface,
-                       const Monitor *monitor, bool paused)
+static void draw_strip_mask(HDC dc, const StripLayout *layout, const Monitor *monitor, bool paused)
 {
-    solid(dc, &bounds, STRIP_COLOR_KEY);
-    if (!layout || !layout->font) return;
+    const RECT bounds = {0, 0, layout->width * STRIP_SUPERSAMPLE,
+                         layout->height * STRIP_SUPERSAMPLE};
+    solid(dc, &bounds, RGB(0, 0, 0));
 
     if (paused) {
-        strip_metric(dc, layout, surface->text, layout->padding,
-                     (bounds.bottom - layout->row_height) / 2,
-                     bounds.right - 2 * layout->padding, L"Stillmeter", L"  |  Sampling paused");
+        strip_metric(dc, layout, layout->padding,
+                     (layout->height - layout->row_height) / 2,
+                     layout->width - 2 * layout->padding, L"Stillmeter", L"  |  Sampling paused");
         return;
     }
 
@@ -480,39 +507,53 @@ static void draw_strip(HDC dc, RECT bounds, const StripLayout *layout, const Str
         L"\u2191 ", L"\u2193 ", L"CPU ", L"RAM ", L"GPU ", L"CPU freq ", L"Total traffic", L""
     };
     const wchar_t *const values[] = {upload, download, cpu, memory, gpu, frequency, L"", total};
-    const int top = (bounds.bottom - 2 * layout->row_height - layout->row_gap) / 2;
+    const int top = (layout->height - 2 * layout->row_height - layout->row_gap) / 2;
     const int bottom = top + layout->row_height + layout->row_gap;
     int x = layout->padding;
     for (unsigned col = 0; col < 4; ++col) {
         if (col == 3 && layout->column_gap >= 4) {
             const int separator = x - layout->column_gap / 2;
-            line(dc, separator, top, separator, bottom + layout->row_height, surface->separator);
+            const RECT rule = {separator * STRIP_SUPERSAMPLE, top * STRIP_SUPERSAMPLE,
+                               (separator + 1) * STRIP_SUPERSAMPLE,
+                               (bottom + layout->row_height) * STRIP_SUPERSAMPLE};
+            solid(dc, &rule, RGB(125, 125, 125));
         }
         const int width = layout->column_width[col];
-        strip_metric(dc, layout, surface->text, x, top, width, labels[2 * col], values[2 * col]);
-        strip_metric(dc, layout, surface->text, x, bottom, width,
+        strip_metric(dc, layout, x, top, width, labels[2 * col], values[2 * col]);
+        strip_metric(dc, layout, x, bottom, width,
                      labels[2 * col + 1], values[2 * col + 1]);
         x += width + layout->column_gap;
     }
 }
 
-void view_strip(HWND window, const StripLayout *layout, StripSurface *surface,
-                const Monitor *monitor, bool paused)
+bool view_strip(HWND window, const POINT *position, const StripLayout *layout,
+                StripSurface *surface, const Monitor *monitor, bool paused)
 {
-    PAINTSTRUCT paint;
-    HDC target = BeginPaint(window, &paint);
-    RECT bounds;
-    if (GetClientRect(window, &bounds)) {
-        HDC canvas = strip_surface_dc(surface, target, bounds.right, bounds.bottom);
-        SetBkMode(canvas, TRANSPARENT);
-        draw_strip(canvas, bounds, layout, surface, monitor, paused);
-        if (canvas != target) {
-            const RECT update = paint.rcPaint;
-            BitBlt(target, update.left, update.top, update.right - update.left,
-                   update.bottom - update.top, canvas, update.left, update.top, SRCCOPY);
+    if (!layout || !layout->font || !strip_surface_prepare(surface, layout->width, layout->height))
+        return false;
+
+    draw_strip_mask(surface->mask.dc, layout, monitor, paused);
+    GdiFlush();
+    // Box-filter a 2x grayscale mask to get smooth coverage even for small glyphs.
+    const int stride = surface->width * STRIP_SUPERSAMPLE;
+    DWORD *pixel = surface->image.pixels;
+    for (int y = 0; y < surface->height; ++y) {
+        const DWORD *top = surface->mask.pixels + y * STRIP_SUPERSAMPLE * stride;
+        const DWORD *bottom = top + stride;
+        for (int x = 0; x < stride; x += STRIP_SUPERSAMPLE) {
+            const DWORD coverage = (top[x] & 255) + (top[x + 1] & 255) +
+                                   (bottom[x] & 255) + (bottom[x + 1] & 255);
+            *pixel++ = surface->palette[(coverage + 2) / 4];
         }
     }
-    EndPaint(window, &paint);
+
+    POINT destination;
+    if (position) destination = *position;
+    SIZE size = {layout->width, layout->height};
+    POINT source = {0, 0};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    return UpdateLayeredWindow(window, NULL, position ? &destination : NULL, &size, surface->image.dc,
+                               &source, 0, &blend, ULW_ALPHA) != FALSE;
 }
 
 void view_tooltip(const Monitor *monitor, bool paused, wchar_t output[TOOLTIP_LENGTH])
