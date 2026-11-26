@@ -16,6 +16,7 @@
 #define TRAY_ICON 1
 #define TRAY_EVENT (WM_APP + 1)
 #define SHOW_DASHBOARD_EVENT (WM_APP + 2)
+#define FOREGROUND_CHANGED_EVENT (WM_APP + 4)
 #define LAYOUT_POLL_MS 2000
 #define APPEARANCE_KEY L"Software\\Stillmeter"
 #define APPEARANCE_VALUE L"StripAppearanceV2"
@@ -35,6 +36,9 @@ typedef struct {
     const StripLayout *placed_layout;
     StripSurface strip_surface;
     ULONGLONG last_layout_request;
+    ULONGLONG panel_closed_at;
+    HWINEVENTHOOK foreground_hook;
+    bool panel_open;
     Monitor monitor;
     UINT taskbar_created;
     bool tray_added;
@@ -203,9 +207,8 @@ static void handle_tray_event(WPARAM wparam, LPARAM lparam)
     }
 }
 
-static bool fullscreen_on(HMONITOR monitor, const RECT *screen)
+static bool fullscreen_on(HWND foreground, HMONITOR monitor, const RECT *screen)
 {
-    const HWND foreground = GetForegroundWindow();
     if (!foreground || foreground == app.dashboard || foreground == GetDesktopWindow() ||
         foreground == GetShellWindow() || IsIconic(foreground) ||
         MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) != monitor)
@@ -218,10 +221,8 @@ static bool fullscreen_on(HMONITOR monitor, const RECT *screen)
            client.right >= screen->right && client.bottom >= screen->bottom;
 }
 
-static const StripLayout *strip_bounds(RECT *target)
+static const StripLayout *strip_bounds(HWND taskbar, HWND foreground, bool retain_layout, RECT *target)
 {
-    if (!app.strip_enabled || app.suspended) return NULL;
-    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
     if (!taskbar || !IsWindowVisible(taskbar)) return NULL;
     const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONULL);
     MONITORINFO monitor_info = {.cbSize = sizeof(monitor_info)};
@@ -234,7 +235,7 @@ static const StripLayout *strip_bounds(RECT *target)
     const int taskbar_width = visible.right - visible.left;
     const UINT native_dpi = window_dpi(taskbar);
     if (taskbar_width < taskbar_height || taskbar_height < scale(28, native_dpi) ||
-        fullscreen_on(monitor, &monitor_info.rcMonitor))
+        (!app.panel_open && fullscreen_on(foreground, monitor, &monitor_info.rcMonitor)))
         return NULL;
 
     const int padding = scale(4, native_dpi);
@@ -243,7 +244,8 @@ static const StripLayout *strip_bounds(RECT *target)
         StripLayout *layout = &app.strip_layouts[i];
         if (view_strip_prepare(layout, &app.appearance, layout_dpi[i], taskbar_height - 2) &&
             taskbar_layout_place(taskbar, &position, &visible, layout->width,
-                                 layout->height, padding, app.appearance.align_right != 0, target))
+                                 layout->height, padding, app.appearance.align_right != 0,
+                                 retain_layout, target))
             return layout;
     }
     return NULL;
@@ -254,20 +256,39 @@ static void position_strip(void)
     if (!app.strip) return;
 
     const bool shown = IsWindowVisible(app.strip) != FALSE;
+    if (!app.strip_enabled || app.suspended) {
+        app.placed_layout = NULL;
+        app.panel_open = false;
+        app.panel_closed_at = 0;
+        if (shown) ShowWindow(app.strip, SW_HIDE);
+        return;
+    }
+
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+    const HWND foreground = GetForegroundWindow();
+    const bool panel_open = taskbar_shell_panel(foreground, taskbar);
+    const ULONGLONG now = GetTickCount64();
+    if (app.panel_open && !panel_open) {
+        app.panel_closed_at = now;
+        request_layout(true);
+    }
+    app.panel_open = panel_open;
+    // Keep the measured gap while Start or Search is open and while Explorer refreshes it.
+    const bool retain_layout = shown && (panel_open || (app.panel_closed_at &&
+                                       now - app.panel_closed_at < LAYOUT_POLL_MS));
     RECT desired;
-    app.placed_layout = strip_bounds(&desired);
+    app.placed_layout = strip_bounds(taskbar, foreground, retain_layout, &desired);
     if (!app.placed_layout) {
         if (shown) ShowWindow(app.strip, SW_HIDE);
         return;
     }
 
     RECT current;
-    bool behind_taskbar = false;
-    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (shown && taskbar)
+    bool raise_strip = false;
+    if (shown)
         for (HWND other = GetWindow(app.strip, GW_HWNDPREV); other; other = GetWindow(other, GW_HWNDPREV))
-            if (other == taskbar) {
-                behind_taskbar = true;
+            if (other == taskbar || (panel_open && other == foreground)) {
+                raise_strip = true;
                 break;
             }
 
@@ -280,7 +301,7 @@ static void position_strip(void)
             return;
         }
     }
-    if (!shown || behind_taskbar)
+    if (!shown || raise_strip)
         SetWindowPos(app.strip, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
 }
@@ -516,6 +537,13 @@ static void handle_command(UINT command)
     }
 }
 
+static void CALLBACK foreground_changed(HWINEVENTHOOK hook, DWORD event, HWND window,
+                                         LONG object, LONG child, DWORD thread, DWORD time)
+{
+    (void)hook; (void)event; (void)window; (void)object; (void)child; (void)thread; (void)time;
+    PostMessageW(app.dashboard, FOREGROUND_CHANGED_EVENT, 0, 0);
+}
+
 static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     if (app.taskbar_created && message == app.taskbar_created) {
@@ -587,6 +615,7 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         }
         return TRUE;
     case TASKBAR_LAYOUT_EVENT:
+    case FOREGROUND_CHANGED_EVENT:
         position_strip();
         return 0;
     case TRAY_EVENT:
@@ -601,6 +630,10 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         return 0;
     case WM_DESTROY:
         KillTimer(window, SAMPLE_TIMER);
+        if (app.foreground_hook) {
+            UnhookWinEvent(app.foreground_hook);
+            app.foreground_hook = NULL;
+        }
         if (app.tray_added) {
             NOTIFYICONDATAW icon = tray_data(window);
             Shell_NotifyIconW(NIM_DELETE, &icon);
@@ -683,6 +716,10 @@ static bool create_windows(void)
         SetWindowTextW(app.strip_button, L"Strip unavailable");
     }
 
+    if (app.strip)
+        app.foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                             NULL, foreground_changed, 0, 0,
+                                             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     return SetTimer(app.dashboard, SAMPLE_TIMER, TIMER_INTERVAL_MS, NULL) != 0;
 }
 

@@ -20,6 +20,49 @@ static TaskbarLayout layout;
 static HANDLE worker;
 static HANDLE events[2];
 
+bool taskbar_shell_panel(HWND foreground, HWND taskbar)
+{
+    if (!foreground || !taskbar) return false;
+    if (foreground == taskbar || GetAncestor(foreground, GA_ROOTOWNER) == taskbar)
+        return true;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+    if (!pid || pid == GetCurrentProcessId()) return false;
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    wchar_t image[512];
+    DWORD length = sizeof(image) / sizeof(*image);
+    const BOOL queried = QueryFullProcessImageNameW(process, 0, image, &length);
+    CloseHandle(process);
+    if (!queried) return false;
+
+    const wchar_t *name = wcsrchr(image, L'\\');
+    if (!name) return false;
+    ++name;
+    static const wchar_t *const hosts[] = {
+        L"StartMenuExperienceHost.exe", L"SearchHost.exe", L"SearchApp.exe",
+        L"SearchUI.exe", L"ShellExperienceHost.exe"
+    };
+    bool known_host = false;
+    for (unsigned i = 0; i < sizeof(hosts) / sizeof(*hosts); ++i)
+        if (CompareStringOrdinal(name, -1, hosts[i], -1, TRUE) == CSTR_EQUAL) {
+            known_host = true;
+            break;
+        }
+    if (!known_host) return false;
+
+    // These system apps can own a monitor-sized host while their panel is open.
+    wchar_t windows[MAX_PATH];
+    const UINT capacity = sizeof(windows) / sizeof(*windows);
+    const UINT root = GetSystemWindowsDirectoryW(windows, capacity);
+    static const wchar_t folder[] = L"\\SystemApps\\";
+    const int folder_len = (int)(sizeof(folder) / sizeof(*folder) - 1);
+    return root > 0 && root < capacity && length > root + (UINT)folder_len &&
+           CompareStringOrdinal(image, (int)root, windows, (int)root, TRUE) == CSTR_EQUAL &&
+           CompareStringOrdinal(image + root, folder_len, folder, folder_len, TRUE) == CSTR_EQUAL;
+}
+
 bool taskbar_find_gap(const RECT *visible, const RECT *occupied, unsigned count,
                       int width, int height, int padding, bool align_right, RECT *slot)
 {
@@ -127,7 +170,14 @@ static bool record_automated_controls(IUIAutomation *automation, IUIAutomationCo
             if (!offscreen && SUCCEEDED(type_status) && reserves_space(type, focusable)) {
                 const HRESULT bounds_status =
                     IUIAutomationElement_get_CachedBoundingRectangle(element, &bounds);
-                complete = SUCCEEDED(bounds_status) && add_control(state, &bounds);
+                if (FAILED(bounds_status)) {
+                    complete = false;
+                } else {
+                    // Popup descendants can intersect the bar while being centered above it.
+                    const LONG center = bounds.top + (bounds.bottom - bounds.top) / 2;
+                    if (center >= state->bounds.top && center < state->bounds.bottom)
+                        complete = add_control(state, &bounds);
+                }
             }
             IUIAutomationElement_Release(element);
         }
@@ -138,11 +188,11 @@ static bool record_automated_controls(IUIAutomation *automation, IUIAutomationCo
     return complete && state->count != 0;
 }
 
-static TaskbarLayout read_layout(IUIAutomation *automation, IUIAutomationCondition *condition,
-                                 IUIAutomationCacheRequest *cache)
+static TaskbarLayout read_layout(HWND taskbar, IUIAutomation *automation,
+                                 IUIAutomationCondition *condition, IUIAutomationCacheRequest *cache)
 {
     TaskbarLayout result = {0};
-    result.taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+    result.taskbar = taskbar;
     if (!result.taskbar || !IsWindowVisible(result.taskbar) ||
         !GetWindowRect(result.taskbar, &result.bounds))
         return result;
@@ -173,9 +223,17 @@ static DWORD WINAPI layout_worker(void *context)
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_IsKeyboardFocusablePropertyId)) &&
         SUCCEEDED(IUIAutomationCacheRequest_AddProperty(cache, UIA_IsOffscreenPropertyId))) {
         while (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
-            TaskbarLayout next = read_layout(automation, condition, cache);
+            const HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+            HWND foreground = GetForegroundWindow();
+            if (foreground != taskbar && taskbar_shell_panel(foreground, taskbar)) continue;
+            TaskbarLayout next = read_layout(taskbar, automation, condition, cache);
+            foreground = GetForegroundWindow();
+            if (foreground != taskbar && taskbar_shell_panel(foreground, taskbar)) continue;
+
             AcquireSRWLockExclusive(&layout_lock);
-            layout = next;
+            if (next.complete || next.taskbar != layout.taskbar ||
+                !EqualRect(&next.bounds, &layout.bounds))
+                layout = next;
             ReleaseSRWLockExclusive(&layout_lock);
             if (WaitForSingleObject(events[0], 0) == WAIT_OBJECT_0) break;
             PostMessageW(recipient, TASKBAR_LAYOUT_EVENT, 0, 0);
@@ -220,12 +278,13 @@ void taskbar_layout_stop(void)
 }
 
 bool taskbar_layout_place(HWND window, const RECT *bounds, const RECT *visible,
-                          int width, int height, int padding, bool align_right, RECT *slot)
+                          int width, int height, int padding, bool align_right,
+                          bool retain_layout, RECT *slot)
 {
     AcquireSRWLockShared(&layout_lock);
     const bool placed = layout.complete && layout.taskbar == window &&
                        EqualRect(bounds, &layout.bounds) &&
-                       GetTickCount64() - layout.measured <= LAYOUT_MAX_AGE_MS &&
+                       (retain_layout || GetTickCount64() - layout.measured <= LAYOUT_MAX_AGE_MS) &&
                        taskbar_find_gap(visible, layout.occupied, layout.count,
                                         width, height, padding, align_right, slot);
     ReleaseSRWLockShared(&layout_lock);

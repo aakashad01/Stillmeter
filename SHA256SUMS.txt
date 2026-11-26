@@ -1,2 +1,2 @@
-6137c151d8fe727a2a6c68c5ba5bf67bc1d073c13f560e69dd28b5d9cd821a7a  Windows-x64/Stillmeter.exe
-f29b907be6147bbf1911388d1555a5ebecb20e5553378cbfd104b21fb6b409ca  Windows-ARM64/Stillmeter.exe
+c1de07b9f83708f531acd3f7b70a0e11f9a0a8fe6e30dffea0f6884f6aff31a7  Windows-x64/Stillmeter.exe
+82b8f86b5de204e9a5114e9f7e55bf53140c7fc31a91483f7d1e6e173c9e5a8a  Windows-ARM64/Stillmeter.exe
