@@ -18,10 +18,11 @@
 #define SHOW_DASHBOARD_EVENT (WM_APP + 2)
 #define FOREGROUND_CHANGED_EVENT (WM_APP + 4)
 #define LAYOUT_POLL_MS 2000
-#define APPEARANCE_KEY L"Software\\Stillmeter"
+#define SETTINGS_KEY L"Software\\Stillmeter"
 #define APPEARANCE_VALUE L"StripAppearanceV3"
+#define ADAPTER_VALUE L"NetworkAdapter"
 
-enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP, STRIP_APPEARANCE };
+enum { SHOW_DASHBOARD = 1001, TOGGLE_STRIP, TOGGLE_PAUSE, EXIT_APP, STRIP_APPEARANCE, NETWORK_ADAPTER };
 
 typedef struct {
     HINSTANCE instance;
@@ -33,6 +34,7 @@ typedef struct {
     HWND strip_button;
     HWND pause_button;
     HWND appearance_button;
+    HWND adapter_button;
     ViewFonts dashboard_fonts;
     StripAppearance appearance;
     StripLayout strip_layouts[2];
@@ -76,14 +78,14 @@ static StripAppearance load_appearance(void)
 {
     StripAppearance saved;
     DWORD bytes = sizeof(saved);
-    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, APPEARANCE_VALUE,
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, APPEARANCE_VALUE,
                      RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
         bytes == sizeof(saved) && appearance_valid(&saved))
         return saved;
 
     // V2 stored four group bits in the same field as the V3 metric mask.
     bytes = sizeof(saved);
-    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, L"StripAppearanceV2",
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"StripAppearanceV2",
                      RRF_RT_REG_BINARY, NULL, &saved, &bytes) == ERROR_SUCCESS &&
         bytes == sizeof(saved) && saved.metrics <= 15) {
         static const DWORD group_metrics[] = {
@@ -101,7 +103,7 @@ static StripAppearance load_appearance(void)
     DWORD legacy[3];
     bytes = sizeof(legacy);
     saved = appearance_presets[0];
-    if (RegGetValueW(HKEY_CURRENT_USER, APPEARANCE_KEY, L"StripAppearance",
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, L"StripAppearance",
                      RRF_RT_REG_BINARY, NULL, legacy, &bytes) == ERROR_SUCCESS &&
         bytes == sizeof(legacy)) {
         saved.font_size = legacy[0];
@@ -111,14 +113,25 @@ static StripAppearance load_appearance(void)
     return appearance_valid(&saved) ? saved : appearance_presets[0];
 }
 
-static bool save_appearance(const StripAppearance *appearance)
+static AdapterSelection load_adapter(void)
+{
+    AdapterSelection saved;
+    DWORD bytes = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, SETTINGS_KEY, ADAPTER_VALUE, RRF_RT_REG_BINARY,
+                     NULL, &saved, &bytes) == ERROR_SUCCESS && bytes == sizeof(saved) &&
+        saved.mode <= ADAPTER_SINGLE &&
+        (saved.mode != ADAPTER_SINGLE || !IsEqualGUID(&saved.guid, &(GUID){0})))
+        return saved;
+    return (AdapterSelection){.mode = ADAPTER_ALL};
+}
+
+static bool save_setting(const wchar_t *name, const void *value, DWORD size)
 {
     HKEY key;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, APPEARANCE_KEY, 0, NULL, 0,
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0,
                         KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
         return false;
-    const LSTATUS status = RegSetValueExW(key, APPEARANCE_VALUE, 0, REG_BINARY,
-                                         (const BYTE *)appearance, sizeof(*appearance));
+    const LSTATUS status = RegSetValueExW(key, name, 0, REG_BINARY, value, size);
     RegCloseKey(key);
     return status == ERROR_SUCCESS;
 }
@@ -195,6 +208,7 @@ static void tray_menu(POINT position)
                 (app.layout_started ? MF_ENABLED : MF_GRAYED),
                 TOGGLE_STRIP, L"Show taskbar strip");
     AppendMenuW(menu, MF_STRING, STRIP_APPEARANCE, L"Strip appearance…");
+    AppendMenuW(menu, MF_STRING, NETWORK_ADAPTER, L"Network adapter…");
     AppendMenuW(menu, MF_STRING, TOGGLE_PAUSE, app.paused ? L"Resume sampling" : L"Pause sampling");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, EXIT_APP, L"Exit Stillmeter");
@@ -445,14 +459,17 @@ static void layout_buttons(HWND window)
         if (dpi == 0) dpi = 1;
     }
     view_fonts_init(&app.dashboard_fonts, dpi);
+    SendMessageW(app.adapter_button, WM_SETFONT, (WPARAM)app.dashboard_fonts.regular, TRUE);
+    MoveWindow(app.adapter_button, scale(22, dpi), scale(431, dpi),
+               scale(156, dpi), scale(29, dpi), TRUE);
     SendMessageW(app.strip_button, WM_SETFONT, (WPARAM)app.dashboard_fonts.regular, TRUE);
     SendMessageW(app.pause_button, WM_SETFONT, (WPARAM)app.dashboard_fonts.regular, TRUE);
-    MoveWindow(app.strip_button, scale(22, dpi), scale(431, dpi),
+    MoveWindow(app.strip_button, scale(22, dpi), scale(469, dpi),
                scale(156, dpi), scale(29, dpi), TRUE);
-    MoveWindow(app.pause_button, scale(187, dpi), scale(431, dpi),
+    MoveWindow(app.pause_button, scale(187, dpi), scale(469, dpi),
                scale(141, dpi), scale(29, dpi), TRUE);
     SendMessageW(app.appearance_button, WM_SETFONT, (WPARAM)app.dashboard_fonts.regular, TRUE);
-    MoveWindow(app.appearance_button, scale(337, dpi), scale(431, dpi),
+    MoveWindow(app.appearance_button, scale(337, dpi), scale(469, dpi),
                scale(117, dpi), scale(29, dpi), TRUE);
 }
 
@@ -600,7 +617,7 @@ static INT_PTR CALLBACK appearance_proc(HWND dialog, UINT message, WPARAM wparam
             app.placed_layout = NULL;
             position_strip();
             repaint();
-            if (!save_appearance(&next))
+            if (!save_setting(APPEARANCE_VALUE, &next, sizeof(next)))
                 MessageBoxW(dialog, L"Appearance was applied for this run. "
                             L"Windows couldn't save it.", APP_NAME, MB_OK | MB_ICONINFORMATION);
         }
@@ -608,6 +625,80 @@ static INT_PTR CALLBACK appearance_proc(HWND dialog, UINT message, WPARAM wparam
     } else {
         return FALSE;
     }
+    return TRUE;
+}
+
+enum { FIRST_ADAPTER_ITEM = ADAPTER_SINGLE + 1 };
+
+static LRESULT add_adapter_choice(HWND combo, const wchar_t *label, LPARAM data)
+{
+    const LRESULT item = SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)label);
+    if (item >= 0) SendMessageW(combo, CB_SETITEMDATA, item, data);
+    return item;
+}
+
+static void open_adapter_choices(HWND dialog, const MIB_IF_TABLE2 *table)
+{
+    const HWND combo = GetDlgItem(dialog, IDC_NETWORK_ADAPTER);
+    LRESULT selected = add_adapter_choice(combo, L"All adapters", ADAPTER_ALL);
+    const LRESULT automatic = add_adapter_choice(combo, L"Auto select", ADAPTER_AUTO);
+    if (app.monitor.adapter.mode == ADAPTER_AUTO) selected = automatic;
+    bool found = false;
+    if (table) {
+        for (ULONG i = 0; i < table->NumEntries; ++i) {
+            const MIB_IF_ROW2 *row = &table->Table[i];
+            if (!monitor_adapter_supported(row) || IsEqualGUID(&row->InterfaceGuid, &(GUID){0}))
+                continue;
+            wchar_t label[IF_MAX_STRING_SIZE + 24];
+            swprintf(label, sizeof(label) / sizeof(*label), L"%ls%ls", monitor_adapter_name(row),
+                     monitor_adapter_active(row) ? L"" : L" (disconnected)");
+            const LRESULT item = add_adapter_choice(combo, label, (LPARAM)i + FIRST_ADAPTER_ITEM);
+            if (item >= 0 && app.monitor.adapter.mode == ADAPTER_SINGLE &&
+                IsEqualGUID(&row->InterfaceGuid, &app.monitor.adapter.guid)) {
+                selected = item;
+                found = true;
+            }
+        }
+    }
+    if (app.monitor.adapter.mode == ADAPTER_SINGLE && !found)
+        selected = add_adapter_choice(combo, L"Saved adapter (unavailable)", ADAPTER_SINGLE);
+    SendMessageW(combo, CB_SETCURSEL, selected, 0);
+    EnableWindow(GetDlgItem(dialog, IDOK), selected >= 0);
+}
+
+static INT_PTR CALLBACK adapter_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_INITDIALOG) {
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        open_adapter_choices(dialog, (const MIB_IF_TABLE2 *)lparam);
+        return TRUE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+    if (LOWORD(wparam) == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (LOWORD(wparam) != IDOK) return FALSE;
+
+    const HWND combo = GetDlgItem(dialog, IDC_NETWORK_ADAPTER);
+    const LRESULT selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (selected < 0) return TRUE;
+    const LRESULT item = SendMessageW(combo, CB_GETITEMDATA, selected, 0);
+    if (item < 0) return TRUE;
+    AdapterSelection next = {.mode = (DWORD)item};
+    if (item == ADAPTER_SINGLE) {
+        next = app.monitor.adapter;
+    } else if (item >= FIRST_ADAPTER_ITEM) {
+        const MIB_IF_TABLE2 *table = (const MIB_IF_TABLE2 *)GetWindowLongPtrW(dialog, DWLP_USER);
+        const size_t row = (size_t)(item - FIRST_ADAPTER_ITEM);
+        if (!table || row >= table->NumEntries) return TRUE;
+        next = (AdapterSelection){ADAPTER_SINGLE, table->Table[row].InterfaceGuid};
+    }
+    if (monitor_set_adapter(&app.monitor, &next) &&
+        !save_setting(ADAPTER_VALUE, &next, sizeof(next)))
+        MessageBoxW(dialog, L"Adapter selection applies for this run. Windows couldn't save it.",
+                    APP_NAME, MB_OK | MB_ICONINFORMATION);
+    EndDialog(dialog, IDOK);
     return TRUE;
 }
 
@@ -623,6 +714,14 @@ static void handle_command(UINT command)
                         app.dashboard, appearance_proc, (LPARAM)&dialog);
         view_strip_layout_close(&dialog.preview_layout);
         view_strip_surface_close(&dialog.preview_surface);
+        break;
+    }
+    case NETWORK_ADAPTER: {
+        PMIB_IF_TABLE2 table = monitor_adapter_table(&app.monitor);
+        const INT_PTR result = DialogBoxParamW(app.instance, MAKEINTRESOURCEW(IDD_NETWORK_ADAPTER),
+                                               app.dashboard, adapter_proc, (LPARAM)table);
+        if (table) app.monitor.release_table(table);
+        if (result == IDOK) refresh();
         break;
     }
     case TOGGLE_STRIP:
@@ -665,6 +764,9 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
 
     switch (message) {
     case WM_CREATE:
+        app.adapter_button = CreateWindowExW(0, L"BUTTON", L"&Network adapter…",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                  0, 0, 0, 0, window, (HMENU)(INT_PTR)NETWORK_ADAPTER, app.instance, NULL);
         app.strip_button = CreateWindowExW(0, L"BUTTON", L"&Hide taskbar strip",
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                 0, 0, 0, 0, window, (HMENU)(INT_PTR)TOGGLE_STRIP, app.instance, NULL);
@@ -674,7 +776,8 @@ static LRESULT CALLBACK dashboard_proc(HWND window, UINT message, WPARAM wparam,
         app.appearance_button = CreateWindowExW(0, L"BUTTON", L"Strip &appearance…",
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                 0, 0, 0, 0, window, (HMENU)(INT_PTR)STRIP_APPEARANCE, app.instance, NULL);
-        if (!app.strip_button || !app.pause_button || !app.appearance_button) return -1;
+        if (!app.adapter_button || !app.strip_button || !app.pause_button || !app.appearance_button)
+            return -1;
         layout_buttons(window);
         return 0;
     case WM_PAINT: {
@@ -863,6 +966,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command, int s
     view_strip_theme(&app.strip_surface);
     app.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     monitor_init(&app.monitor);
+    const AdapterSelection adapter = load_adapter();
+    monitor_set_adapter(&app.monitor, &adapter);
 
     int exit_code = 1;
     if (single_instance && create_windows()) {

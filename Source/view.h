@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define DASHBOARD_WIDTH 476
-#define DASHBOARD_HEIGHT 474
+#define DASHBOARD_HEIGHT 512
 #define TOOLTIP_LENGTH 128
 #define STATUS_LENGTH 100
 

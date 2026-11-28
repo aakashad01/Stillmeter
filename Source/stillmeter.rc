@@ -4,8 +4,8 @@
 101 ICON "stillmeter.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,5,3,0
- PRODUCTVERSION 1,5,3,0
+ FILEVERSION 1,5,4,0
+ PRODUCTVERSION 1,5,4,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0
  FILEOS 0x40004L
@@ -17,11 +17,11 @@
      BLOCK "040904b0"
      BEGIN
        VALUE "FileDescription", "Stillmeter system monitor"
-       VALUE "FileVersion", "1.5.3.0"
+       VALUE "FileVersion", "1.5.4.0"
        VALUE "InternalName", "Stillmeter"
        VALUE "OriginalFilename", "Stillmeter.exe"
        VALUE "ProductName", "Stillmeter"
-       VALUE "ProductVersion", "1.5.3.0"
+       VALUE "ProductVersion", "1.5.4.0"
      END
    END
    BLOCK "VarFileInfo"
@@ -68,4 +68,18 @@ BEGIN
     PUSHBUTTON "&Apply", IDC_STRIP_APPLY, 161, 235, 49, 15
     DEFPUSHBUTTON "OK", 1, 217, 235, 49, 15
     PUSHBUTTON "Cancel", 2, 272, 235, 49, 15
+END
+
+IDD_NETWORK_ADAPTER DIALOGEX 0, 0, 305, 120
+STYLE 0x80000000 | 0x00C00000 | 0x00080000 | 0x00000800 | 0x00000040
+EXSTYLE 0x00000001
+CAPTION "Network adapter"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Measure traffic on", -1, 12, 13, 280, 10
+    COMBOBOX IDC_NETWORK_ADAPTER, 12, 27, 281, 105, 0x00010000 | 0x0003 | 0x00200000
+    LTEXT "Auto select follows an active adapter using Windows routing.", -1, 12, 52, 281, 12
+    LTEXT "Changing the selection resets the traffic graph and total.", -1, 12, 69, 281, 12
+    DEFPUSHBUTTON "OK", 1, 188, 94, 49, 15
+    PUSHBUTTON "Cancel", 2, 244, 94, 49, 15
 END

@@ -243,7 +243,8 @@ static void draw_traffic(HDC dc, const ViewFonts *fonts, Palette colors,
         solid(dc, &caption, colors.surface);
         const wchar_t *message = paused ? L"Sampling paused" : L"Waiting for readings";
         if (!paused && monitor->network_readable && !monitor->active_adapters)
-            message = L"No active Wi-Fi or Ethernet";
+            message = monitor->adapter.mode == ADAPTER_SINGLE
+                      ? L"Selected adapter unavailable" : L"No active Wi-Fi or Ethernet";
         if (!paused && !monitor->network_readable)
             message = L"Network counters unavailable";
         text_at(dc, caption, fonts->regular, colors.muted, message, DT_CENTER);
@@ -270,6 +271,28 @@ static void draw_load_card(HDC dc, const ViewFonts *fonts, Palette colors, int x
         filled.right = filled.left + MulDiv(filled.right - filled.left, load, 100);
         solid(dc, &filled, accent);
     }
+}
+
+static void draw_adapter_status(HDC dc, const ViewFonts *fonts, Palette colors, const Monitor *monitor)
+{
+    wchar_t status[IF_MAX_STRING_SIZE + 38];
+    const wchar_t *name = monitor->adapter_name;
+    const wchar_t *label = L"All adapters";
+    if (monitor->adapter.mode == ADAPTER_AUTO) {
+        label = L"Auto select";
+        if (name[0]) {
+            swprintf(status, sizeof(status) / sizeof(*status), L"Auto: %ls", name);
+            label = status;
+        }
+    } else if (monitor->adapter.mode == ADAPTER_SINGLE) {
+        label = monitor->network_readable ? L"Saved adapter (unavailable)" : L"Saved adapter";
+        if (name[0]) {
+            swprintf(status, sizeof(status) / sizeof(*status), L"%ls%ls", name,
+                     monitor->active_adapters ? L"" : L" (disconnected)");
+            label = status;
+        }
+    }
+    text_at(dc, box(fonts, 189, 431, 265, 29), fonts->regular, colors.muted, label, DT_LEFT);
 }
 
 void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor, bool paused,
@@ -308,6 +331,7 @@ void view_dashboard(HWND window, const ViewFonts *fonts, const Monitor *monitor,
     }
     text_at(dc, box(fonts, 23, 407, 429, 20), fonts->regular, colors.muted,
             strip_status ? strip_status : status, DT_LEFT);
+    draw_adapter_status(dc, fonts, colors, monitor);
     paint_end(window, &buffer);
 }
 
