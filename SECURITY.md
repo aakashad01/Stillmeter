@@ -20,4 +20,4 @@ Download Stillmeter from [GitHub Releases](https://github.com/aakashad01/Stillme
 
 ## Local operation
 
-Stillmeter reads Windows system and network adapter counters locally. It sends no telemetry and performs no automatic update checks. Traffic history is kept in memory, and appearance preferences are saved in the current user’s Windows registry.
+Stillmeter reads Windows system and network adapter counters locally. Auto select also reads the local Windows routing table. Stillmeter sends no telemetry and performs no automatic update checks. Traffic history is kept in memory. Appearance preferences and the adapter selection are saved in the current user’s Windows registry.

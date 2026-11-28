@@ -4,9 +4,9 @@ Stillmeter is a portable Windows monitor for download and upload rates, CPU load
 
 ## Download
 
-[Download Stillmeter 1.5.3 for Windows (ZIP)](https://github.com/aakashad01/Stillmeter/archive/refs/tags/v1.5.3.zip)
+[Download the latest Stillmeter release for Windows](https://github.com/aakashad01/Stillmeter/releases/latest)
 
-The ZIP includes both Windows executables, source code, and SHA-256 checksums. See the [v1.5.3 release notes](https://github.com/aakashad01/Stillmeter/releases/tag/v1.5.3).
+The release ZIP includes both Windows executables, source code, and SHA-256 checksums.
 
 ## Run
 
@@ -29,15 +29,25 @@ The strip draws semibold, anti-aliased text with transparent edges and scales fo
 
 ## Readings
 
-Download and upload are in bytes per second, using decimal units. Stillmeter sums active physical Wi-Fi and Ethernet adapters. VPN traffic is reflected in the physical adapter totals as it moves across the connection. Virtual adapters, loopback, and cellular adapters are excluded. An em dash means a reading is unavailable or waiting for a baseline. RAM percentage is calculated from total and available physical memory.
+Download and upload are in bytes per second, using decimal units. An em dash means a reading is unavailable or waiting for a baseline. RAM percentage is calculated from total and available physical memory.
 
-GPU utilization is the busiest GPU engine, using local Windows performance counters. CPU frequency is the Windows reported processor frequency. A dash indicates an unavailable reading. Total traffic counts upload and download during the current Stillmeter session.
+GPU utilization is the busiest GPU engine, using local Windows performance counters. CPU frequency is the Windows reported processor frequency. A dash indicates an unavailable reading. Total traffic counts upload and download since Stillmeter started or since the adapter selection last changed.
+
+## Network adapter
+
+Open **Network adapter** from the dashboard or tray menu.
+
+- **All adapters** adds up traffic across all active physical Wi-Fi and Ethernet adapters. This is the default.
+- **Auto select** follows one active physical adapter using Windows' default-route costs. If there is no eligible default route, it keeps the current active adapter when possible or picks another active adapter.
+- **A named adapter** pins traffic readings to that Wi-Fi or Ethernet adapter. Readings resume when it reconnects.
+
+The selection applies to the dashboard, tray, and taskbar strip. It is saved for the next run. Changing it clears the traffic graph and total. VPN traffic is reflected in physical adapter readings as it moves across the connection.
 
 ## Local operation
 
 - The app makes zero outbound connections. Traffic rates come from the Windows IP Helper interface table and contain byte counts only.
 - No telemetry, update requests, packet capture, host lookup, server, or account setup.
-- Traffic history lives in memory. Only strip appearance settings are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
+- Traffic history lives in memory. Strip appearance and adapter selection are saved under the current user’s Windows registry. Stillmeter writes no monitoring logs, adds no startup entries, and requests no elevated permissions.
 - The app runs in its own process with native Windows controls, ASLR, DEP, Control Flow Guard, and system-directory DLL loading. The strip uses public Win32 window APIs to attach from Stillmeter’s separate process.
 - `SHA256SUMS.txt` contains the executable hashes. PowerShell can verify either file with `Get-FileHash .\Stillmeter.exe -Algorithm SHA256`.
 

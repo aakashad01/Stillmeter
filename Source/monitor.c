@@ -4,6 +4,8 @@
 #include <string.h>
 #include <pdhmsg.h>
 
+#define AUTO_ROUTE_INTERVAL_MS 3000
+
 static uint64_t file_time_value(FILETIME value)
 {
     return ((uint64_t)value.dwHighDateTime << 32) | value.dwLowDateTime;
@@ -41,36 +43,147 @@ static void sample_memory(Monitor *monitor)
                             (double)monitor->memory_total + 0.5);
 }
 
-static bool count_adapter(const MIB_IF_ROW2 *row)
+bool monitor_adapter_supported(const MIB_IF_ROW2 *row)
 {
     return (row->Type == IF_TYPE_ETHERNET_CSMACD || row->Type == IF_TYPE_IEEE80211) &&
-           row->OperStatus == IfOperStatusUp &&
            row->InterfaceAndOperStatusFlags.HardwareInterface &&
-           !row->InterfaceAndOperStatusFlags.FilterInterface &&
+           !row->InterfaceAndOperStatusFlags.FilterInterface;
+}
+
+bool monitor_adapter_active(const MIB_IF_ROW2 *row)
+{
+    return monitor_adapter_supported(row) && row->OperStatus == IfOperStatusUp &&
            !row->InterfaceAndOperStatusFlags.NotMediaConnected;
 }
 
-static void sample_network(Monitor *monitor, uint64_t elapsed_ms)
+const wchar_t *monitor_adapter_name(const MIB_IF_ROW2 *row)
+{
+    if (row->Alias[0]) return row->Alias;
+    if (row->Description[0]) return row->Description;
+    return row->Type == IF_TYPE_IEEE80211 ? L"Wi-Fi" : L"Ethernet";
+}
+
+PMIB_IF_TABLE2 monitor_adapter_table(const Monitor *monitor)
+{
+    PMIB_IF_TABLE2 table = NULL;
+    return monitor->read_interfaces && monitor->read_interfaces(&table) == NO_ERROR
+           ? table : NULL;
+}
+
+static const MIB_IF_ROW2 *active_interface(const MIB_IF_TABLE2 *table, NET_LUID luid)
+{
+    for (ULONG i = 0; i < table->NumEntries; ++i) {
+        const MIB_IF_ROW2 *row = &table->Table[i];
+        if (row->InterfaceLuid.Value == luid.Value && monitor_adapter_active(row)) return row;
+    }
+    return NULL;
+}
+
+static const MIB_IF_ROW2 *default_route_adapter(const Monitor *monitor, const MIB_IF_TABLE2 *table)
+{
+    PMIB_IPFORWARD_TABLE2 routes = NULL;
+    if (!monitor->read_routes || !monitor->read_ip_interface ||
+        monitor->read_routes(AF_UNSPEC, &routes) != NO_ERROR || !routes)
+        return NULL;
+
+    const MIB_IF_ROW2 *best = NULL;
+    uint64_t best_cost = 0;
+    for (ULONG i = 0; i < routes->NumEntries; ++i) {
+        const MIB_IPFORWARD_ROW2 *route = &routes->Table[i];
+        if (route->DestinationPrefix.PrefixLength != 0 || route->Loopback) continue;
+        const MIB_IF_ROW2 *row = active_interface(table, route->InterfaceLuid);
+        if (!row) continue;
+
+        MIB_IPINTERFACE_ROW ip = {.Family = route->DestinationPrefix.Prefix.si_family,
+                                 .InterfaceLuid = route->InterfaceLuid};
+        if (monitor->read_ip_interface(&ip) != NO_ERROR || ip.DisableDefaultRoutes) continue;
+        const uint64_t cost = (uint64_t)route->Metric + ip.Metric;
+        if (!best || cost < best_cost ||
+            (cost == best_cost && row->InterfaceLuid.Value < best->InterfaceLuid.Value)) {
+            best = row;
+            best_cost = cost;
+        }
+    }
+    monitor->release_table(routes);
+    return best;
+}
+
+static const MIB_IF_ROW2 *auto_adapter(Monitor *monitor, const MIB_IF_TABLE2 *table,
+                                      uint64_t now)
+{
+    const MIB_IF_ROW2 *first = NULL;
+    const MIB_IF_ROW2 *previous = NULL;
+    size_t count = 0;
+    for (ULONG i = 0; i < table->NumEntries; ++i) {
+        const MIB_IF_ROW2 *row = &table->Table[i];
+        if (!monitor_adapter_active(row)) continue;
+        ++count;
+        if (!first || row->InterfaceLuid.Value < first->InterfaceLuid.Value) first = row;
+        if (row->InterfaceLuid.Value == monitor->auto_luid.Value) previous = row;
+    }
+    if (count <= 1) {
+        monitor->route_checked_at = 0;
+        return first;
+    }
+    if (previous && monitor->route_checked_at && now - monitor->route_checked_at < AUTO_ROUTE_INTERVAL_MS)
+        return previous;
+
+    monitor->route_checked_at = now;
+    const MIB_IF_ROW2 *best = default_route_adapter(monitor, table);
+    if (best) return best;
+    return previous ? previous : first;
+}
+
+static const MIB_IF_ROW2 *saved_adapter(const Monitor *monitor, const MIB_IF_TABLE2 *table)
+{
+    for (ULONG i = 0; i < table->NumEntries; ++i) {
+        const MIB_IF_ROW2 *row = &table->Table[i];
+        if (monitor_adapter_supported(row) && IsEqualGUID(&row->InterfaceGuid, &monitor->adapter.guid))
+            return row;
+    }
+    return NULL;
+}
+
+static void clear_network_reading(Monitor *monitor)
 {
     monitor->traffic = (TrafficRate){0};
     monitor->active_adapters = 0;
     monitor->network_readable = false;
+    monitor->adapter_name[0] = L'\0';
+}
 
-    PMIB_IF_TABLE2 table = NULL;
-    if (!monitor->read_interfaces || monitor->read_interfaces(&table) != NO_ERROR || !table) {
+static void sample_network(Monitor *monitor, uint64_t elapsed_ms, uint64_t now)
+{
+    clear_network_reading(monitor);
+    PMIB_IF_TABLE2 table = monitor_adapter_table(monitor);
+    if (!table) {
         monitor->previous_count = 0;
+        monitor->route_checked_at = 0;
         return;
     }
 
+    const MIB_IF_ROW2 *selected = NULL;
     size_t count = 0;
-    for (ULONG i = 0; i < table->NumEntries; ++i) {
-        if (count_adapter(&table->Table[i])) ++count;
+    if (monitor->adapter.mode == ADAPTER_ALL) {
+        for (ULONG i = 0; i < table->NumEntries; ++i)
+            if (monitor_adapter_active(&table->Table[i])) ++count;
+    } else {
+        if (monitor->adapter.mode == ADAPTER_AUTO) {
+            selected = auto_adapter(monitor, table, now);
+            monitor->auto_luid = selected ? selected->InterfaceLuid : (NET_LUID){0};
+        } else {
+            selected = saved_adapter(monitor, table);
+        }
+        if (selected) {
+            wcscpy(monitor->adapter_name, monitor_adapter_name(selected));
+            if (monitor_adapter_active(selected)) count = 1;
+        }
     }
     if (count > monitor->current_capacity) {
         AdapterCounters *entries = realloc(monitor->current, count * sizeof(*entries));
         if (!entries) {
             monitor->previous_count = 0;
-            monitor->release_interfaces(table);
+            monitor->release_table(table);
             return;
         }
         monitor->current = entries;
@@ -78,15 +191,15 @@ static void sample_network(Monitor *monitor, uint64_t elapsed_ms)
     }
 
     size_t index = 0;
-    for (ULONG i = 0; i < table->NumEntries; ++i) {
+    for (ULONG i = 0; i < table->NumEntries && index < count; ++i) {
         const MIB_IF_ROW2 *row = &table->Table[i];
-        if (count_adapter(row)) {
+        if ((!selected || row == selected) && monitor_adapter_active(row)) {
             monitor->current[index++] = (AdapterCounters){
                 row->InterfaceLuid.Value, row->InOctets, row->OutOctets
             };
         }
     }
-    monitor->release_interfaces(table);
+    monitor->release_table(table);
 
     monitor->network_readable = true;
     monitor->active_adapters = count;
@@ -186,9 +299,32 @@ void monitor_init(Monitor *monitor)
 
     monitor->read_interfaces =
         (ReadInterfaceTable)(void *)GetProcAddress(monitor->ip_helper, "GetIfTable2");
-    monitor->release_interfaces =
-        (ReleaseInterfaceTable)(void *)GetProcAddress(monitor->ip_helper, "FreeMibTable");
-    if (!monitor->release_interfaces) monitor->read_interfaces = NULL;
+    monitor->release_table =
+        (ReleaseMibTable)(void *)GetProcAddress(monitor->ip_helper, "FreeMibTable");
+    if (!monitor->release_table) {
+        monitor->read_interfaces = NULL;
+        return;
+    }
+    monitor->read_routes =
+        (ReadRouteTable)(void *)GetProcAddress(monitor->ip_helper, "GetIpForwardTable2");
+    monitor->read_ip_interface =
+        (ReadIpInterface)(void *)GetProcAddress(monitor->ip_helper, "GetIpInterfaceEntry");
+}
+
+bool monitor_set_adapter(Monitor *monitor, const AdapterSelection *selection)
+{
+    if (monitor->adapter.mode == selection->mode &&
+        (selection->mode != ADAPTER_SINGLE || IsEqualGUID(&monitor->adapter.guid, &selection->guid)))
+        return false;
+
+    monitor->adapter = *selection;
+    clear_network_reading(monitor);
+    monitor->previous_count = 0;
+    monitor->route_checked_at = 0;
+    monitor->auto_luid = (NET_LUID){0};
+    monitor->history = (TrafficHistory){0};
+    monitor->session_bytes = 0.0;
+    return true;
 }
 
 void monitor_sample(Monitor *monitor)
@@ -200,7 +336,7 @@ void monitor_sample(Monitor *monitor)
 
     sample_cpu(monitor, elapsed_ms);
     sample_memory(monitor);
-    sample_network(monitor, elapsed_ms);
+    sample_network(monitor, elapsed_ms, now);
     sample_performance(monitor, elapsed_ms);
     if (monitor->traffic.available)
         monitor->session_bytes += (monitor->traffic.download + monitor->traffic.upload) *
@@ -210,7 +346,7 @@ void monitor_sample(Monitor *monitor)
 
 void monitor_reset(Monitor *monitor)
 {
-    monitor->traffic = (TrafficRate){0};
+    clear_network_reading(monitor);
     monitor->history = (TrafficHistory){0};
     monitor->gpu = -1;
     monitor->cpu_mhz = 0.0;
@@ -218,9 +354,8 @@ void monitor_reset(Monitor *monitor)
     monitor->memory = -1;
     monitor->memory_used = 0;
     monitor->memory_total = 0;
-    monitor->network_readable = false;
-    monitor->active_adapters = 0;
     monitor->previous_count = 0;
+    monitor->route_checked_at = 0;
     monitor->previous_cpu_valid = false;
     monitor->last_tick = 0;
 }
